@@ -94,14 +94,24 @@ export async function startBroker(name: string, extraConfig: string[] = [], pers
   return { name: container, port, url: `mqtt://127.0.0.1:${port}`, dataDir: join(dir, "data") };
 }
 
-/** Removes a container and its data directory if they exist. */
+/**
+ * Removes a container and its data directory if they exist. The broker writes the data directory as its own user
+ * (uid 1883), which a Linux host user may not delete, so the contents go first through a root container on the same
+ * image (Docker Desktop on a Mac remaps ownership and never needed it).
+ */
 function removeBroker(container: string, dir: string): void {
   try {
     docker("rm", "-f", container);
   } catch {
     /* not running: nothing to remove */
   }
-  if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  if (!existsSync(dir)) return;
+  try {
+    docker("run", "--rm", "--user", "0", "--entrypoint", "sh", "-v", `${dir}:/d`, IMAGE, "-c", "rm -rf /d/* /d/.[!.]* 2>/dev/null; true");
+  } catch {
+    /* Docker unavailable: rmSync below reports what it can't remove */
+  }
+  rmSync(dir, { recursive: true, force: true });
 }
 
 /** Stops the broker cleanly (SIGTERM, so it writes its persistence file) and starts it again. */

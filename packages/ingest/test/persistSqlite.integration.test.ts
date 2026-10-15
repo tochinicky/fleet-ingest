@@ -12,7 +12,7 @@
  * Each test runs its own brokers on a host data directory, so a "restart" is a new container on the same files.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "mqtt";
@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { telemetryTopic } from "@fleet-ingest/contract";
 import { startSubscriber } from "../src/adapters/mqttSubscriber.ts";
 import type { Delivery } from "../src/adapters/mqttSubscriber.ts";
-import { MOSQUITTO_IMAGE } from "./support/containers.ts";
+import { MOSQUITTO_IMAGE, removeBrokerDataDir } from "./support/containers.ts";
 
 /** The shared-subscription filter ingest uses. */
 const SHARED = "$share/ingest/homes/+/devices/+/telemetry";
@@ -52,7 +52,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const container of containers) await container.stop().catch(() => undefined);
   containers = [];
-  rmSync(dataDir, { recursive: true, force: true });
+  removeBrokerDataDir(dataDir);
 });
 
 /**
