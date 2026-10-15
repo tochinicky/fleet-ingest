@@ -1,0 +1,179 @@
+# Unit tests for the alert rules (`promtool test rules`), fed with synthetic series. They cover the alerts that are
+# awkward to trigger live (IngestStalled needs ingest connected but starved; BrokerBacklogHigh needs 5 min of backlog)
+# and the never-set-gauge traps of S6-4.
+rule_files:
+  - rules.yml
+evaluation_interval: 10s
+
+tests:
+  - name: IngestStalled fires when nothing arrives for 30 s while gateways are connected
+    interval: 10s
+    input_series:
+      - series: 'ingest_last_message_received_timestamp_seconds{instance="ingest-1:9464"}'
+        values: '0+10x6 60x10'
+      - series: 'broker_clients_connected'
+        values: '510x16'
+    alert_rule_test:
+      - eval_time: 60s
+        alertname: IngestStalled
+        exp_alerts: []
+      - eval_time: 150s
+        alertname: IngestStalled
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "Ingest received nothing for 30 s while gateways are connected"
+              runbook: docs/runbooks.md#ingest-connected-but-receiving-nothing-after-a-broker-restart
+
+  - name: IngestStalled stays quiet when only the services are connected, or the gauge was never set
+    interval: 10s
+    input_series:
+      - series: 'ingest_last_message_received_timestamp_seconds{instance="ingest-1:9464"}'
+        values: '0x16'
+      - series: 'broker_clients_connected'
+        values: '510x16'
+    alert_rule_test:
+      - eval_time: 150s
+        alertname: IngestStalled
+        exp_alerts: []
+
+  - name: BrokerBacklogHigh needs 5 minutes over 24k
+    interval: 1m
+    input_series:
+      - series: 'broker_store_messages'
+        values: '500 30000x7'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: BrokerBacklogHigh
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: BrokerBacklogHigh
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Over 24k messages waiting at the broker for 5 min"
+              related: IngestLagHigh
+              runbook: docs/runbooks.md#broker-backlog-high-alert-brokerbackloghigh
+
+  - name: BrokerDroppingMessages sees a rise in the $SYS counter, and survives a broker restart's reset
+    interval: 30s
+    input_series:
+      - series: 'broker_publish_messages_dropped'
+        values: '0 0 0 120 120 0 0 0 0'
+      - series: 'broker_log_events_by_kind_total{kind="dropping"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BrokerDroppingMessages
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "The broker is dropping messages: a session queue hit its bound (D3)"
+              runbook: docs/runbooks.md#broker-dropping-messages-alert-brokerdroppingmessages
+      - eval_time: 4m30s
+        alertname: BrokerDroppingMessages
+        exp_alerts: []
+
+  - name: HealthJobStale ignores a gauge that was never set (0) after a restart
+    interval: 30s
+    input_series:
+      - series: 'fleet_health_job_part_last_success_timestamp_seconds{part="gaps"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HealthJobStale
+        exp_alerts: []
+
+  - name: HealthJobStale fires for the one part that stopped succeeding, while the others stay fresh
+    interval: 30s
+    input_series:
+      - series: 'fleet_health_job_part_last_success_timestamp_seconds{part="health"}'
+        values: '0+30x12'
+      - series: 'fleet_health_job_part_last_success_timestamp_seconds{part="gaps"}'
+        values: '0 30 30 30 30 30 30 30 30 30 30 30 30'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HealthJobStale
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: HealthJobStale
+        exp_alerts:
+          - exp_labels: { severity: warning, part: gaps }
+            exp_annotations:
+              summary: "The API's health job hasn't completed its gaps part for 2 min: fleet alerts are working on stale data"
+              runbook: docs/runbooks.md#health-job-stale-alert-healthjobstale
+
+  - name: HealthJobFailing fires on two failures of a part in 5 min, not on one
+    interval: 30s
+    input_series:
+      - series: 'fleet_health_job_failures_total{part="gaps", reason="timeout", instance="api:9465"}'
+        values: '0 0 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2'
+      - series: 'fleet_health_job_failures_total{part="health", reason="error", instance="api:9465"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: HealthJobFailing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: HealthJobFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, part: gaps, reason: timeout }
+            exp_annotations:
+              summary: "The API's health job keeps failing its gaps part (timeout)"
+              runbook: docs/runbooks.md#health-job-failing-alert-healthjobfailing
+      - eval_time: 11m
+        alertname: HealthJobFailing
+        exp_alerts: []
+
+  - name: CommandNotApplied fires once a stuck command has lasted 1 min, and resolves when it's applied
+    interval: 15s
+    input_series:
+      - series: 'fleet_commands_stuck'
+        values: '0x4 2x8 0x4'
+    alert_rule_test:
+      - eval_time: 75s
+        alertname: CommandNotApplied
+        exp_alerts: []
+      - eval_time: 165s
+        alertname: CommandNotApplied
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "2 online gateway(s) haven't applied their desired mode within 5 min"
+              runbook: docs/runbooks.md#command-not-applied-alert-commandnotapplied
+      - eval_time: 240s
+        alertname: CommandNotApplied
+        exp_alerts: []
+
+  - name: DBWriteErrors stays quiet for a single retry, like one connect timeout during a cold start
+    interval: 15s
+    input_series:
+      - series: 'ingest_db_retries_total{instance="ingest-1:9464"}'
+        values: '0x4 1x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DBWriteErrors
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DBWriteErrors
+        exp_alerts: []
+
+  - name: DBWriteErrors fires for sustained retries, like scenario 3a's outage, and resolves when they stop
+    interval: 15s
+    input_series:
+      - series: 'ingest_db_retries_total{instance="ingest-1:9464"}'
+        values: '0x4 0+2x12 24x20'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: DBWriteErrors
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: DBWriteErrors
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Ingest is retrying database writes"
+              runbook: docs/runbooks.md#database-write-errors-alerts-dbwriteerrors-batchretryingtoolong
+      - eval_time: 8m
+        alertname: DBWriteErrors
+        exp_alerts: []

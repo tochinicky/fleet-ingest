@@ -1,0 +1,26 @@
+# Who may publish and subscribe to what (D6). The username is the client certificate's CN.
+# Anything not granted here is denied.
+
+# Gateways (CN = gateway ID): publish their own status (including the Last Will) and their own devices' readings,
+# and read their own commands. Tighter than `write homes/%u/#`, which would let a gateway overwrite the retained
+# command the cloud set for it.
+pattern write homes/%u/status
+pattern write homes/%u/devices/+/telemetry
+pattern read homes/%u/commands
+
+# Ingest replicas: read every gateway's readings and status (they subscribe through $share/ingest/...).
+user ingest-1
+topic read homes/+/devices/+/telemetry
+topic read homes/+/status
+
+user ingest-2
+topic read homes/+/devices/+/telemetry
+topic read homes/+/status
+
+# The API publishes desired modes (slice 5).
+user api
+topic write homes/+/commands
+
+# Operators and the scenario scripts: broker statistics only.
+user ops
+topic read $SYS/#

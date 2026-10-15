@@ -1,0 +1,213 @@
+# The fleet-ingest lab stack (slice 1): broker, database, two ingest replicas, the API and a 10-gateway fleet.
+# This is a lab with a fictional domain, not a production deployment.
+#
+#   scripts/dev-certs.sh 10                     # the lab CA and every certificate (once; again for more gateways)
+#   docker compose -f deploy/compose.yaml up -d --build
+#   curl -s localhost:8080/fleet -H "Authorization: Bearer dev-token-change-me-0123"
+#
+# Toxiproxy sits between ingest and Postgres, and between the fleet and the broker (the gateways' "internet"):
+#   curl -X POST localhost:8474/proxies/postgres -d '{"enabled":false}'   # Postgres "down" for ingest (true: back)
+#   proxies "wan" (90% of gateways) and "wan-cuttable" (every 10th gateway): scenario 2 cuts the second
+#
+# Observability (slice 6): Prometheus http://localhost:9090, Alertmanager :9093, Grafana http://localhost:3000
+# (dashboard "fleet-ingest", anonymous viewer), alert log http://localhost:9095/alerts.
+
+name: fleet-ingest
+
+x-node: &node
+  build: { context: .., dockerfile: Dockerfile }
+  image: fleet-ingest/node:dev
+  init: true
+
+x-ingest: &ingest
+  <<: *node
+  command: ["node", "packages/ingest/src/main.ts"]
+  volumes: ["./certs:/certs:ro"]
+  restart: always
+  healthcheck:
+    test: ["CMD", "test", "-f", "/tmp/ingest-ready"]
+    interval: 2s
+    retries: 30
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+    mosquitto: { condition: service_started }
+    toxiproxy: { condition: service_started }
+
+volumes:
+  mosquitto-data: {}
+  mosquitto-log: {}
+  postgres-data: {}
+  prometheus-data: {}
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.1.2-alpine
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+      # D6: CA, broker certificate and key, CRL. Mounted, never baked into an image.
+      - ./certs:/mosquitto/certs:ro
+    ports: ["127.0.0.1:8883:8883"]
+    # D3: measured RSS at 240k queued (213.5 MB with persist-sqlite, 209 MB with snapshots; S6-12) x 1.25. Overload
+    # becomes counted drops at the queue bound, never an OOM kill that would also lose the last flush period.
+    mem_limit: 267m
+    restart: always
+
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: fleet
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet-dev-only
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "fleet", "-d", "fleet"]
+      interval: 2s
+      retries: 30
+    restart: always
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes: ["./toxiproxy.json:/config/toxiproxy.json:ro"]
+    ports: ["127.0.0.1:8474:8474"]
+    restart: always
+
+  migrate:
+    <<: *node
+    command: ["node", "packages/db/src/main.ts"]
+    environment:
+      DATABASE_URL: postgres://fleet:fleet-dev-only@postgres:5432/fleet
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  # Two replicas with fixed client IDs (D2): a killed replica comes back as itself and resumes its session.
+  ingest-1:
+    <<: *ingest
+    environment: &ingest-env
+      BATCH_MAX_ROWS: ${BATCH_MAX_ROWS:-500}
+      MQTT_URL: mqtts://mosquitto:8883
+      MQTT_CLIENT_ID: ingest-1
+      MQTT_CA_FILE: /certs/ca.crt
+      MQTT_CERT_FILE: /certs/ingest-1.crt
+      MQTT_KEY_FILE: /certs/ingest-1.key
+      # Through toxiproxy, so the scenarios can cut or slow the database for ingest only.
+      DATABASE_URL: postgres://fleet:fleet-dev-only@toxiproxy:15432/fleet
+
+  ingest-2:
+    <<: *ingest
+    environment:
+      <<: *ingest-env
+      MQTT_CLIENT_ID: ingest-2
+      MQTT_CERT_FILE: /certs/ingest-2.crt
+      MQTT_KEY_FILE: /certs/ingest-2.key
+
+  api:
+    <<: *node
+    command: ["node", "packages/api/src/main.ts"]
+    environment:
+      DATABASE_URL: postgres://fleet:fleet-dev-only@postgres:5432/fleet
+      API_TOKEN: ${API_TOKEN:-dev-token-change-me-0123}
+      # Commands are published with the api certificate; the broker ACL lets it write only homes/+/commands.
+      MQTT_URL: mqtts://mosquitto:8883
+      MQTT_CA_FILE: /certs/ca.crt
+      MQTT_CERT_FILE: /certs/api.crt
+      MQTT_KEY_FILE: /certs/api.key
+    volumes: ["./certs:/certs:ro"]
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      mosquitto: { condition: service_started }
+    restart: always
+
+  fleet-sim:
+    <<: *node
+    command: ["node", "packages/fleet-sim/src/main.ts"]
+    environment:
+      MQTT_URL: mqtts://toxiproxy:18883
+      MQTT_URL_CUTTABLE: mqtts://toxiproxy:18884
+      MQTT_SERVERNAME: mosquitto
+      CERTS_DIR: /certs
+      GATEWAY_COUNT: ${GATEWAY_COUNT:-10}
+      RECONNECT_JITTER_MAX_MS: ${RECONNECT_JITTER_MAX_MS:-0}
+    volumes: ["./certs:/certs:ro"]
+    ports: ["127.0.0.1:8090:8090"]
+    # On a brand-new broker, readings published before ingest's sessions exist have no subscriber and are discarded.
+    depends_on:
+      ingest-1: { condition: service_healthy }
+      ingest-2: { condition: service_healthy }
+      toxiproxy: { condition: service_started }
+    restart: always
+
+  # Turns $SYS (read with the ops certificate) and the broker's log file into Prometheus metrics (S6-3).
+  broker-exporter:
+    <<: *node
+    command: ["node", "packages/broker-exporter/src/main.ts"]
+    # Mosquitto writes its log file as 0600 owned by its own user (uid 1883); reading it as that user, read-only, is
+    # the least privilege that works.
+    user: "1883:1883"
+    environment:
+      MQTT_URL: mqtts://mosquitto:8883
+      MQTT_CA_FILE: /certs/ca.crt
+      MQTT_CERT_FILE: /certs/ops.crt
+      MQTT_KEY_FILE: /certs/ops.key
+    volumes:
+      - ./certs:/certs:ro
+      - mosquitto-log:/mosquitto/log:ro
+    depends_on:
+      mosquitto: { condition: service_started }
+    restart: always
+
+  # Alertmanager's webhook receiver: logs every alert, and lists them on GET /alerts for the demo scripts.
+  alert-logger:
+    <<: *node
+    command: ["node", "packages/alert-logger/src/main.ts"]
+    ports: ["127.0.0.1:9095:9095"]
+    restart: always
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=8d"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    restart: always
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes: ["./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"]
+    ports: ["127.0.0.1:9093:9093"]
+    restart: always
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-fleet-dev-only}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fleet-ingest.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on: [prometheus]
+    restart: always
+
+  # Container memory and CPU, as a cross-check of the broker's own $SYS heap figures (S0-4).
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    command: ["--docker_only=true", "--housekeeping_interval=15s", "--store_container_labels=false"]
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: always

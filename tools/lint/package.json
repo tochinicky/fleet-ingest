@@ -1,0 +1,13 @@
+{
+  "name": "@fleet-ingest/lint",
+  "private": true,
+  "type": "module",
+  "description": "ESLint for the whole repo. typescript-eslint needs TypeScript's classic compiler API, which TypeScript 7 no longer ships, so this package parses with its own TypeScript 5.9; type checking stays with the root's TypeScript 7 (decisions.md S7-2).",
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

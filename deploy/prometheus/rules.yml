@@ -1,0 +1,153 @@
+# Recording and alert rules (decisions.md S6-1, S6-2). Every alert has a runbook entry in docs/runbooks.md,
+# linked from its annotations.
+groups:
+  - name: slo
+    rules:
+      # SLO (S6-1): 99% of readings, measured while their gateway was connected, are queryable within 30 s of being
+      # measured, over 7 days. Ratios of good / total over several windows, for the dashboard and the burn-rate alerts.
+      - record: fleet:slo_good_ratio:5m
+        expr: sum(increase(fleet_slo_readings_good_total[5m])) / sum(increase(fleet_slo_readings_total[5m]))
+      - record: fleet:slo_good_ratio:30m
+        expr: sum(increase(fleet_slo_readings_good_total[30m])) / sum(increase(fleet_slo_readings_total[30m]))
+      - record: fleet:slo_good_ratio:1h
+        expr: sum(increase(fleet_slo_readings_good_total[1h])) / sum(increase(fleet_slo_readings_total[1h]))
+      - record: fleet:slo_good_ratio:6h
+        expr: sum(increase(fleet_slo_readings_good_total[6h])) / sum(increase(fleet_slo_readings_total[6h]))
+      - record: fleet:slo_good_ratio:7d
+        expr: sum(increase(fleet_slo_readings_good_total[7d])) / sum(increase(fleet_slo_readings_total[7d]))
+      - record: fleet:ingest_commit_delay_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(ingest_commit_delay_seconds_bucket[5m])))
+      - record: fleet:ingest_messages_received:rate1m
+        expr: sum(rate(ingest_messages_received_total[1m]))
+
+  - name: fleet
+    rules:
+      - alert: GatewayOffline
+        expr: fleet_gateway_offline == 1
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Gateway {{ $labels.gateway }} is offline"
+          description: "No proof of life since its last offline status, or silent for 3 min (decisions.md S5-1, S5-6). If IngestLagHigh is firing too, offline detection is delayed by up to that lag (S5-8)."
+          related: IngestLagHigh
+          runbook: docs/runbooks.md#a-gateway-is-offline-alert-gatewayoffline
+      - alert: DeviceStale
+        expr: fleet_device_stale == 1
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Device {{ $labels.device }} behind online gateway {{ $labels.gateway }} sent nothing for over 60 s"
+          runbook: docs/runbooks.md#a-device-is-stale-alert-devicestale
+      - alert: CommandNotApplied
+        # The 5 minutes are in the health job's rule (S7-1): counted from when the mode was set or the gateway came back,
+        # whichever is later, so only an online gateway that had time to apply it counts. /fleet lists which ones.
+        expr: fleet_commands_stuck > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} online gateway(s) haven't applied their desired mode within 5 min"
+          runbook: docs/runbooks.md#command-not-applied-alert-commandnotapplied
+      - alert: SLOBurnFast
+        # The budget is 1%. A burn rate of 14.4 over 1 h (confirmed over 5 min) would use 2% of a 30-day budget in an hour.
+        expr: (1 - fleet:slo_good_ratio:1h) > 14.4 * 0.01 and (1 - fleet:slo_good_ratio:5m) > 14.4 * 0.01
+        labels: { severity: critical }
+        annotations:
+          summary: "The ingest SLO is burning its error budget fast"
+          runbook: docs/runbooks.md#slo-burn-alerts-sloburnfast-sloburnslow
+      - alert: SLOBurnSlow
+        expr: (1 - fleet:slo_good_ratio:6h) > 6 * 0.01 and (1 - fleet:slo_good_ratio:30m) > 6 * 0.01
+        labels: { severity: warning }
+        annotations:
+          summary: "The ingest SLO is burning its error budget"
+          runbook: docs/runbooks.md#slo-burn-alerts-sloburnfast-sloburnslow
+      - alert: HealthJobStale
+        # Per part (S7-10): a part that keeps failing (gaps, say) would otherwise hide behind passes that skip it.
+        # "> 0": a gauge that was never set reads 0, i.e. 1970 (S6-4).
+        expr: time() - fleet_health_job_part_last_success_timestamp_seconds > 120 and fleet_health_job_part_last_success_timestamp_seconds > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "The API's health job hasn't completed its {{ $labels.part }} part for 2 min: fleet alerts are working on stale data"
+          runbook: docs/runbooks.md#health-job-stale-alert-healthjobstale
+      - alert: HealthJobFailing
+        # Two failures of one part in 5 min (of about 20 passes, 5 for gaps): earlier than HealthJobStale, and it also
+        # catches a part that fails often but not always (S7-10).
+        expr: sum by (part, reason) (increase(fleet_health_job_failures_total[5m])) >= 2
+        labels: { severity: warning }
+        annotations:
+          summary: "The API's health job keeps failing its {{ $labels.part }} part ({{ $labels.reason }})"
+          runbook: docs/runbooks.md#health-job-failing-alert-healthjobfailing
+
+  - name: ingest
+    rules:
+      - alert: IngestLagHigh
+        expr: fleet:ingest_commit_delay_seconds:p95_5m > 60
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 from receipt to commit is over 60 s: ingest is slow, or retrying a failing database"
+          description: "Doesn't see time spent waiting in the broker queue before receipt; BrokerBacklogHigh covers that (S6-1). While this fires, GatewayOffline is delayed by up to the lag."
+          related: GatewayOffline, BrokerBacklogHigh
+          runbook: docs/runbooks.md#ingest-lag-high-alert-ingestlaghigh
+      - alert: IngestStalled
+        # Nothing received for 30 s while more than the services are connected: the S3-9 silent outage, made loud.
+        expr: (time() - max(ingest_last_message_received_timestamp_seconds) > 30) and on() (max(ingest_last_message_received_timestamp_seconds) > 0) and on() (max(broker_clients_connected) > 6)
+        for: 10s
+        labels: { severity: critical }
+        annotations:
+          summary: "Ingest received nothing for 30 s while gateways are connected"
+          runbook: docs/runbooks.md#ingest-connected-but-receiving-nothing-after-a-broker-restart
+      - alert: BatchRetryingTooLong
+        expr: max(ingest_batch_retrying_seconds) > 300
+        labels: { severity: critical }
+        annotations:
+          summary: "A batch has been failing for over 5 min; nothing is being acknowledged, so the broker queue is filling"
+          runbook: docs/runbooks.md#database-write-errors-alerts-dbwriteerrors-batchretryingtoolong
+      - alert: DBWriteErrors
+        # At least 3 retries in 2 min, for 1 min: a real outage retries about every 8 s across the replicas (31 in
+        # scenario 3a's 120 s), while a cold start can retry one connect once, which isn't worth waking anyone (S7-11).
+        expr: sum(increase(ingest_db_retries_total[2m])) >= 3
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Ingest is retrying database writes"
+          runbook: docs/runbooks.md#database-write-errors-alerts-dbwriteerrors-batchretryingtoolong
+      - alert: DeadLettersAppearing
+        expr: sum by (reason) (increase(ingest_dead_letters_total[5m])) > 0
+        labels: { severity: info }
+        annotations:
+          summary: "Messages are being dead-lettered (reason {{ $labels.reason }})"
+          runbook: docs/runbooks.md#dead-letters-appearing-alert-deadlettersappearing
+
+  - name: broker
+    rules:
+      - alert: BrokerDroppingMessages
+        expr: increase(broker_publish_messages_dropped[2m]) > 0 or sum(increase(broker_log_events_by_kind_total{kind="dropping"}[2m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The broker is dropping messages: a session queue hit its bound (D3)"
+          runbook: docs/runbooks.md#broker-dropping-messages-alert-brokerdroppingmessages
+      - alert: BrokerBacklogHigh
+        # 10% of the total bound (2 sessions × 120,000), held for 5 min: messages are waiting at the broker.
+        expr: broker_store_messages > 24000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Over 24k messages waiting at the broker for 5 min"
+          related: IngestLagHigh
+          runbook: docs/runbooks.md#broker-backlog-high-alert-brokerbackloghigh
+      - alert: IngestSessionExpired
+        # Per client, so it fires only for ingest's sessions. The very first expiry of a client that never had one
+        # can be missed (its series starts at 1, S6-4); the per-kind counter in BrokerDroppingMessages has no gap.
+        expr: sum(increase(broker_log_events_total{kind="expiring", client=~"ingest-.*"}[10m])) > 0 or (broker_log_events_total{kind="expiring", client=~"ingest-.*"} unless broker_log_events_total{kind="expiring", client=~"ingest-.*"} offset 10m)
+        labels: { severity: critical }
+        annotations:
+          summary: "An ingest session expired: whatever was queued for it is gone, and nothing is queued until it subscribes again"
+          runbook: docs/runbooks.md#cold-start-a-new-broker-or-an-expired-ingest-session
+      - alert: BrokerExporterStale
+        expr: time() - broker_sys_last_update_timestamp_seconds > 60 and broker_sys_last_update_timestamp_seconds > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "No $SYS values for 60 s: broker alerts are blind"
+          runbook: docs/runbooks.md#reading-broker-statistics-sys-with-mtls

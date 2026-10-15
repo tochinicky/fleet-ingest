@@ -1,0 +1,12 @@
+{
+  "name": "@fleet-ingest/scripts",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "mqtt": "5.16.0",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
+}

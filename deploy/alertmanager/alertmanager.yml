@@ -1,0 +1,13 @@
+# Alertmanager for the lab: every alert goes to the alert-logger webhook, which logs it (no real paging).
+route:
+  receiver: log
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: log
+    webhook_configs:
+      - url: http://alert-logger:9095/alerts
+        send_resolved: true

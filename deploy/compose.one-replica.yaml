@@ -1,0 +1,9 @@
+# Load-test override: a single ingest replica (ingest-2 disabled), to measure what one replica sustains.
+# Use on a fresh broker volume: an existing ingest-2 session would keep its shared-subscription turn (D2).
+services:
+  ingest-2:
+    profiles: ["disabled"]
+  fleet-sim:
+    depends_on: !reset
+      ingest-1: { condition: service_healthy }
+      toxiproxy: { condition: service_started }

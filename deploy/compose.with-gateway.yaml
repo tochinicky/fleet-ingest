@@ -1,0 +1,85 @@
+# The `with-gateway` profile: the real .NET gateway from home-energy-gateway, with its simulated home (four
+# Modbus devices and an OCPP charge point), connected to this broker over mutual TLS. Scenario 9 runs on it.
+#
+#   scripts/pki.sh issue deploy/certs gw-001     # the gateway's own certificate, CN = its gateway ID (D6)
+#   docker compose -f deploy/compose.yaml -f deploy/compose.with-gateway.yaml --profile with-gateway up -d --build
+#
+# - The gateway repo is read, never changed: GATEWAY_REPO points at a checkout (default: next to this one).
+# - Its "internet" is the `gateway-wan` route in toxiproxy, separate from fleet-sim's, so cutting it affects only the
+#   real gateway.
+# - The home LAN gets its own subnet (192.168.78.0/24), so it can't clash with the gateway repo's own demo stack.
+networks:
+  home:
+    ipam:
+      config:
+        - subnet: 192.168.78.0/24
+  vendorb-link: {}
+
+volumes:
+  gateway-data: {}
+
+x-home: &home
+  profiles: [with-gateway]
+  networks: [home]
+  restart: unless-stopped
+
+services:
+  inverter-sunspec:
+    <<: *home
+    build: { context: "${GATEWAY_REPO:-../../home-energy-gateway}", dockerfile: sim/Dockerfile, args: { PROJECT: Inverter.SunSpec } }
+
+  inverter-vendorb:
+    <<: *home
+    networks: [vendorb-link]
+    build: { context: "${GATEWAY_REPO:-../../home-energy-gateway}", dockerfile: sim/Dockerfile, args: { PROJECT: Inverter.VendorB } }
+
+  toxiproxy-home:
+    <<: *home
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes: ["${GATEWAY_REPO:-../../home-energy-gateway}/deploy/toxiproxy-home.json:/config/toxiproxy.json:ro"]
+    networks: [home, vendorb-link]
+    depends_on: [inverter-vendorb]
+
+  battery:
+    <<: *home
+    build: { context: "${GATEWAY_REPO:-../../home-energy-gateway}", dockerfile: sim/Dockerfile, args: { PROJECT: Battery } }
+    environment:
+      Battery__MeterUrl: http://meter:8080/state
+
+  meter:
+    <<: *home
+    networks: [home, vendorb-link]
+    build: { context: "${GATEWAY_REPO:-../../home-energy-gateway}", dockerfile: sim/Dockerfile, args: { PROJECT: Meter } }
+    environment:
+      Meter__PvSources__0: http://inverter-sunspec:8080/state
+      Meter__PvSources__1: http://inverter-vendorb:8080/state
+      Meter__BatterySources__0: http://battery:8080/state
+      Meter__EvSources__0: http://chargepoint:8080/state
+
+  chargepoint:
+    <<: *home
+    build: { context: "${GATEWAY_REPO:-../../home-energy-gateway}", dockerfile: sim/Dockerfile, args: { PROJECT: ChargePoint } }
+    environment:
+      ChargePoint__CentralSystemUrl: ws://gateway:9000/ocpp/
+
+  gateway:
+    <<: *home
+    build: { context: "${GATEWAY_REPO:-../../home-energy-gateway}", dockerfile: src/Gateway/Dockerfile }
+    networks: [home, default]
+    volumes:
+      - gateway-data:/app/data
+      - ./certs/ca.crt:/certs/ca.crt:ro
+      - ./certs/gw-001.crt:/certs/gw-001.crt:ro
+      - ./certs/gw-001.key:/certs/gw-001.key:ro
+    environment:
+      Discovery__Subnet: 192.168.78.0/24
+      Discovery__RescanInterval: "00:01:00"
+      Uplink__Host: toxiproxy
+      Uplink__Port: "18885"
+      Uplink__GatewayId: gw-001
+      Uplink__TlsCaFile: /certs/ca.crt
+      Uplink__TlsCertificateFile: /certs/gw-001.crt
+      Uplink__TlsKeyFile: /certs/gw-001.key
+      Uplink__TlsServerName: mosquitto
+    depends_on: [inverter-sunspec, toxiproxy-home, battery, meter, toxiproxy, mosquitto]

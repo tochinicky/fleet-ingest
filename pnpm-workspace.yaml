@@ -1,0 +1,18 @@
+packages:
+  - "packages/*"
+  - "spikes/*"
+  - "scripts"
+  - "tools/*"
+
+# Optional native builds pulled in by test tooling (testcontainers' SSH transport, protobuf postinstall). Nothing here
+# needs them, so they stay unbuilt, on purpose.
+allowBuilds:
+  cpu-features: false
+  protobufjs: false
+  ssh2: false
+
+# ingest's error classifier matches the driver's messages for a lost connection (decisions.md S7-9), so the driver is
+# pinned exactly: pg in packages/ingest, and pg-pool (pg's own range is ^3) here. A driver bump must pass the canary in
+# packages/ingest/test/driverMessages.test.ts.
+overrides:
+  pg-pool: 3.14.0

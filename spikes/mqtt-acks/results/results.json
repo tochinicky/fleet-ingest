@@ -1,0 +1,335 @@
+{
+  "deferred-puback-allows-batching": {
+    "id": "deferred-puback-allows-batching",
+    "tier": "stop",
+    "proves": "With PUBACKs held at the packet writer, a full batch arrives unacked, and acks released after commit (in arrival order) are honoured by the broker",
+    "pass": true,
+    "observed": {
+      "receivedWhileHolding": 20,
+      "heldAcks": 20,
+      "arrivalOrderIs1to20": true,
+      "redeliveredAfterReleaseAndResume": 0
+    }
+  },
+  "unacked-redelivered-after-resume": {
+    "id": "unacked-redelivered-after-resume",
+    "tier": "stop",
+    "proves": "An unacked QoS 1 message is redelivered (DUP=1) after reconnecting with the same client ID; acked ones are not",
+    "pass": true,
+    "observed": {
+      "receivedAfterResume": [
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "dupFlagged": [
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    }
+  },
+  "broker-honours-receive-maximum": {
+    "id": "broker-honours-receive-maximum",
+    "tier": "stop",
+    "proves": "The broker never exceeds ingest's Receive Maximum of unacked deliveries",
+    "pass": true,
+    "observed": {
+      "receiveMaximum": 10,
+      "published": 50,
+      "beforeRelease": 10,
+      "afterReleasingFive": 15
+    }
+  },
+  "documented-hold-blocks-receiving": {
+    "id": "documented-hold-blocks-receiving",
+    "tier": "record",
+    "proves": "Holding the documented customHandleAcks callback lets only one message in at a time (head-of-line blocking)",
+    "pass": null,
+    "observed": {
+      "published": 20,
+      "receivedWhileHolding": 1,
+      "receivedAfterReleasingOneByOne": 20
+    }
+  },
+  "queue-survives-clean-restart": {
+    "id": "queue-survives-clean-restart",
+    "tier": "escalate",
+    "proves": "Queued QoS 1 messages for an offline persistent session survive a clean broker restart under autosave",
+    "pass": true,
+    "observed": {
+      "queued": 500,
+      "deliveredAfterRestart": 500
+    }
+  },
+  "crash-loses-since-last-snapshot": {
+    "id": "crash-loses-since-last-snapshot",
+    "tier": "escalate",
+    "proves": "After SIGKILL, queued messages up to the last autosave survive and only later ones are lost",
+    "pass": true,
+    "observed": {
+      "autosaveIntervalSeconds": 5,
+      "queuedBeforeSnapshot": 500,
+      "queuedAfterSnapshot": 300,
+      "survivedFromBeforeSnapshot": 500,
+      "survivedFromAfterSnapshot": 0
+    }
+  },
+  "documented-hold-stalls-keepalive": {
+    "id": "documented-hold-stalls-keepalive",
+    "tier": "record",
+    "proves": "A held customHandleAcks callback also blocks PINGRESP, so a commit slower than the keepalive drops the connection",
+    "pass": null,
+    "observed": {
+      "keepaliveSeconds": 2,
+      "heldForSeconds": 8,
+      "connectedAfterHold": false,
+      "events": [
+        "error: Keepalive timeout",
+        "close"
+      ]
+    }
+  },
+  "inflight-is-min-of-rm-and-broker": {
+    "id": "inflight-is-min-of-rm-and-broker",
+    "tier": "record",
+    "proves": "In-flight to ingest = min(ingest Receive Maximum, broker max_inflight_messages) on MQTT v5",
+    "pass": null,
+    "observed": {
+      "rm1000BrokerDefault": 1000,
+      "rm1000Broker1000": 1000,
+      "rm10Broker1000": 10
+    }
+  },
+  "offline-queue-bound": {
+    "id": "offline-queue-bound",
+    "tier": "record",
+    "proves": "An offline session keeps max_queued_messages and drops the rest, and the drop counter counts them",
+    "pass": null,
+    "observed": {
+      "maxQueuedMessages": 1000,
+      "published": 2000,
+      "delivered": 1000,
+      "firstSeq": 1,
+      "lastSeq": 1000,
+      "droppedCounterDelta": 1000,
+      "dropLogLines": [
+        "2026-10-14T10:56:30: Outgoing messages are being dropped for client ingest-1."
+      ]
+    }
+  },
+  "connected-stalled-queue-bound": {
+    "id": "connected-stalled-queue-bound",
+    "tier": "record",
+    "proves": "A connected but stalled session holds max_queued_messages + Receive Maximum before dropping",
+    "pass": null,
+    "observed": {
+      "receiveMaximum": 10,
+      "maxQueuedMessages": 1000,
+      "published": 2000,
+      "deliveredInTotal": 1020,
+      "droppedCounterDelta": 980
+    }
+  },
+  "sys-topics-available": {
+    "id": "sys-topics-available",
+    "tier": "record",
+    "proves": "Which $SYS topics exist on 2.1.2 for drops, stored/queued messages and memory",
+    "pass": null,
+    "observed": {
+      "totalSysTopics": 55,
+      "relevant": {
+        "$SYS/broker/heap/current": "838992",
+        "$SYS/broker/heap/maximum": "846117",
+        "$SYS/broker/load/messages/received/15min": "0.00",
+        "$SYS/broker/load/messages/received/1min": "0.00",
+        "$SYS/broker/load/messages/received/5min": "0.00",
+        "$SYS/broker/load/messages/sent/15min": "1.20",
+        "$SYS/broker/load/messages/sent/1min": "13.74",
+        "$SYS/broker/load/messages/sent/5min": "3.19",
+        "$SYS/broker/load/publish/dropped/15min": "0.00",
+        "$SYS/broker/load/publish/dropped/1min": "0.00",
+        "$SYS/broker/load/publish/dropped/5min": "0.00",
+        "$SYS/broker/messages/received": "9",
+        "$SYS/broker/messages/sent": "111",
+        "$SYS/broker/messages/stored": "55",
+        "$SYS/broker/publish/messages/dropped": "0",
+        "$SYS/broker/publish/messages/received": "5",
+        "$SYS/broker/publish/messages/sent": "106",
+        "$SYS/broker/retained messages/count": "55",
+        "$SYS/broker/store/messages/bytes": "199",
+        "$SYS/broker/store/messages/count": "55"
+      }
+    }
+  },
+  "shared-subscription-failover": {
+    "id": "shared-subscription-failover",
+    "tier": "record",
+    "proves": "Dead shared-subscription member stays in rotation; its share queues then drops; its in-flight is redelivered with DUP on same-ID restart",
+    "pass": null,
+    "observed": {
+      "published": 64,
+      "inflightToIngest1AtKill": [
+        1,
+        3
+      ],
+      "liveMemberReceivedOf60PublishedAfterKill": 30,
+      "droppedCounterDelta": 20,
+      "ingest1OnResume": [
+        "1(DUP)",
+        "3(DUP)",
+        "5",
+        "7",
+        "9",
+        "11",
+        "13",
+        "15",
+        "17",
+        "19",
+        "21",
+        "23"
+      ],
+      "uniqueStored": 44,
+      "lost": 20
+    }
+  },
+  "memory-and-snapshot-at-240k": {
+    "id": "memory-and-snapshot-at-240k",
+    "tier": "record",
+    "proves": "Broker RSS at 240k queued messages, bytes per queued message, and the stall a full snapshot causes",
+    "pass": null,
+    "observed": {
+      "queued": 240000,
+      "publishRateMsgPerS": 70505,
+      "rssBeforeMB": 6.6,
+      "rssAfterMB": 209.3,
+      "peakRssIncludingSnapshotMB": 209.3,
+      "bytesPerQueuedMessage": 844,
+      "snapshotFileMB": 103.6,
+      "longestBrokerStallDuringSnapshotMs": 3182,
+      "snapshotLog": [
+        "2026-10-14T11:05:47: Saving in-memory database to /mosquitto/data//mosquitto.db."
+      ]
+    }
+  },
+  "deferred-hold-keeps-keepalive": {
+    "id": "deferred-hold-keeps-keepalive",
+    "tier": "stop",
+    "proves": "With PUBACKs held at the packet writer for over 3x keepalive, PINGRESP still flows and the connection stays up",
+    "pass": true,
+    "observed": {
+      "keepaliveSeconds": 2,
+      "heldForSeconds": 7.5,
+      "connectedAfterHold": true,
+      "pingresps": 3,
+      "receivedDuringHold": 2,
+      "stillHeld": 2,
+      "eventsDuringHold": []
+    }
+  },
+  "subscriptions-survive-restart": {
+    "id": "subscriptions-survive-restart",
+    "tier": "record",
+    "proves": "Whether plain and shared subscriptions of a persistent session are restored after a clean broker restart",
+    "pass": null,
+    "observed": {
+      "plain": {
+        "sessionPresent": true,
+        "receivedAfterRestart": 5
+      },
+      "shared": {
+        "sessionPresent": true,
+        "receivedAfterRestart": 0
+      }
+    }
+  },
+  "shared-backlog-survives-restart": {
+    "id": "shared-backlog-survives-restart",
+    "tier": "escalate",
+    "proves": "A backlog queued in an offline shared-subscription session survives a clean broker restart and is delivered after re-subscribing",
+    "pass": true,
+    "observed": {
+      "queuedBeforeRestart": 500,
+      "deliveredAfterResubscribe": 500
+    }
+  },
+  "dropped-counter-two-stalled-members": {
+    "id": "dropped-counter-two-stalled-members",
+    "tier": "record",
+    "proves": "Whether $SYS dropped equals real loss when both shared-subscription members are connected but stalled",
+    "pass": null,
+    "observed": {
+      "published": 5000,
+      "deliveredToEither": 2040,
+      "lost": 2960,
+      "droppedCounterDelta": 2960,
+      "perMember": [
+        1020,
+        1020
+      ],
+      "duplicatesAcrossMembers": 0
+    }
+  },
+  "dropped-counter-retained-statuses": {
+    "id": "dropped-counter-retained-statuses",
+    "tier": "record",
+    "proves": "Whether retained status messages are dropped and counted like readings when both shared members are stalled",
+    "pass": null,
+    "observed": {
+      "published": 5000,
+      "delivered": 2040,
+      "lost": 2960,
+      "droppedCounterDelta": 2960
+    }
+  },
+  "sqlite-restores-shared-subscriptions": {
+    "id": "sqlite-restores-shared-subscriptions",
+    "tier": "record",
+    "proves": "Whether persist-sqlite restores a shared subscription after a clean restart (snapshots don't, S3-9)",
+    "pass": null,
+    "observed": {
+      "sessionPresent": true,
+      "queuedBeforeRestartDelivered": 50,
+      "publishedAfterRestartDelivered": 10
+    }
+  },
+  "sqlite-crash-window": {
+    "id": "sqlite-crash-window",
+    "tier": "record",
+    "proves": "How much acknowledged queue persist-sqlite loses on SIGKILL (flush_period 5 s)",
+    "pass": null,
+    "observed": {
+      "flushPeriodSeconds": 5,
+      "survivedFromBeforeFlush": 500,
+      "ofBeforeFlush": 500,
+      "survivedFromLast300": 0,
+      "ofLast": 300
+    }
+  },
+  "sqlite-cost-at-240k": {
+    "id": "sqlite-cost-at-240k",
+    "tier": "record",
+    "proves": "persist-sqlite's cost with 240k queued: broker RSS, publish rate, and the longest stall while it persists",
+    "pass": null,
+    "observed": {
+      "queued": 240000,
+      "publishRateMsgPerS": 17230,
+      "rssMB": 213.5,
+      "longestBrokerStallMs": 1134
+    }
+  }
+}

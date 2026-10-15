@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.env
+deploy/**/certs/
+**/*.key
+**/*.pem
+spikes/**/data/
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate*
+deploy/terraform/terraform.tfvars
+deploy/terraform/*.tfplan
+deploy/production.env
+demo-results/

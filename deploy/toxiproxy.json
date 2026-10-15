@@ -1,0 +1,26 @@
+[
+  {
+    "name": "postgres",
+    "listen": "0.0.0.0:15432",
+    "upstream": "postgres:5432",
+    "enabled": true
+  },
+  {
+    "name": "wan",
+    "listen": "0.0.0.0:18883",
+    "upstream": "mosquitto:8883",
+    "enabled": true
+  },
+  {
+    "name": "wan-cuttable",
+    "listen": "0.0.0.0:18884",
+    "upstream": "mosquitto:8883",
+    "enabled": true
+  },
+  {
+    "name": "gateway-wan",
+    "listen": "0.0.0.0:18885",
+    "upstream": "mosquitto:8883",
+    "enabled": true
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "name": "@fleet-ingest/spike-mqtt-acks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "spike": "node src/run.ts"
+  },
+  "dependencies": {
+    "mqtt": "5.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0"
+  }
+}

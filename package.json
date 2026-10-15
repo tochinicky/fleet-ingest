@@ -1,0 +1,21 @@
+{
+  "name": "fleet-ingest",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:alerts": "node scripts/check-alerts.ts",
+    "lint": "node tools/lint/node_modules/eslint/bin/eslint.js --config tools/lint/eslint.config.js ."
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}

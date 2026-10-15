@@ -1,0 +1,7 @@
+# Scenario 3b override: the same broker with max_queued_messages 5000 per session (instead of 120,000), so a database
+# outage overflows the queue and the drop counting and alerting can be proven. Never use outside the scenario.
+services:
+  mosquitto:
+    volumes:
+      - ./mosquitto/mosquitto.small-queue.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
