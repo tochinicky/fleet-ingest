@@ -12,9 +12,6 @@
  * Each test runs its own brokers on a host data directory, so a "restart" is a new container on the same files.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { connect } from "mqtt";
 import type { MqttClient } from "mqtt";
 import { GenericContainer, Wait } from "testcontainers";
@@ -23,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { telemetryTopic } from "@fleet-ingest/contract";
 import { startSubscriber } from "../src/adapters/mqttSubscriber.ts";
 import type { Delivery } from "../src/adapters/mqttSubscriber.ts";
-import { MOSQUITTO_IMAGE, removeBrokerDataDir } from "./support/containers.ts";
+import { makeBrokerDataDir, MOSQUITTO_IMAGE, removeBrokerDataDir } from "./support/containers.ts";
 
 /** The shared-subscription filter ingest uses. */
 const SHARED = "$share/ingest/homes/+/devices/+/telemetry";
@@ -40,19 +37,19 @@ const PERSISTENCE = {
   sqlite: ["global_plugin /usr/lib/mosquitto_persist_sqlite.so", `plugin_opt_flush_period ${FLUSH_PERIOD_MS / 1000}`],
 };
 
+let dataParent: string;
 let dataDir: string;
 let containers: StartedTestContainer[] = [];
 let clientCounter = 0;
 
 beforeEach(() => {
-  dataDir = mkdtempSync(join(tmpdir(), "persist-sqlite-"));
-  chmodSync(dataDir, 0o777);
+  ({ parent: dataParent, data: dataDir } = makeBrokerDataDir("persist-sqlite-"));
 });
 
 afterEach(async () => {
   for (const container of containers) await container.stop().catch(() => undefined);
   containers = [];
-  removeBrokerDataDir(dataDir);
+  removeBrokerDataDir(dataParent);
 });
 
 /**

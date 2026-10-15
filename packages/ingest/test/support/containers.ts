@@ -3,7 +3,9 @@
  * on the exact image D2 pins.
  */
 import { execFileSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { GenericContainer, Wait } from "testcontainers";
@@ -15,20 +17,36 @@ export const POSTGRES_IMAGE = "postgres:17.11-alpine";
 export const MOSQUITTO_IMAGE = "eclipse-mosquitto:2.1.2-alpine";
 
 /**
- * Removes a host directory a broker container wrote into. Mosquitto drops to its own user (uid 1883) inside the
- * container, so on a Linux host the files it creates in a bind-mounted directory belong to uid 1883, and the test's
- * own user may not delete them: a plain `rmSync` failed with EPERM on the CI runner. Docker Desktop remaps ownership,
- * so the Mac never showed it. The contents are removed from inside a short-lived root container (the broker image,
- * already pulled), then the now-empty directory from the host. Running the broker as the host's uid instead would
- * have changed the process whose persistence behaviour these tests pin.
+ * A host directory for a broker container's data, and how to remove it afterwards (found by CI on Linux).
+ *
+ * The broker image's entrypoint, running as root, does `chown -R 1883:1883 /mosquitto/data`, so on a Linux host the
+ * bind-mounted directory itself and everything Mosquitto writes in it end up owned by uid 1883. Two things then
+ * stop the test's own user from deleting it: the files aren't theirs, and the temp directory is sticky (`/tmp` is
+ * `drwxrwxrwt`), where only a directory's owner may remove it. Docker Desktop remaps ownership, so the Mac never
+ * showed either.
+ *
+ * So the mounted directory is `data` inside a parent the test owns (`mkdtemp`, not sticky), and cleanup mounts the
+ * *parent* into a short-lived root container on the same image (already pulled) and empties it, `data` included.
+ * The parent is then empty and the test's own, and a plain `rmSync` removes it. No uid has to be passed in, and it
+ * works whatever the image's PUID is. Running the broker as the host's uid instead would have changed the process
+ * whose persistence behaviour the tests pin.
  */
-export function removeBrokerDataDir(dir: string): void {
+export function makeBrokerDataDir(prefix: string): { parent: string; data: string } {
+  const parent = mkdtempSync(join(tmpdir(), prefix));
+  const data = join(parent, "data");
+  mkdirSync(data);
+  chmodSync(data, 0o777);
+  return { parent, data };
+}
+
+/** Removes a directory made by {@link makeBrokerDataDir}, whoever owns what the broker wrote into it. */
+export function removeBrokerDataDir(parent: string): void {
   try {
-    execFileSync("docker", ["run", "--rm", "--user", "0", "--entrypoint", "sh", "-v", `${dir}:/d`, MOSQUITTO_IMAGE, "-c", "rm -rf /d/* /d/.[!.]* 2>/dev/null; true"], { stdio: "ignore" });
+    execFileSync("docker", ["run", "--rm", "--user", "0", "--entrypoint", "sh", "-v", `${parent}:/p`, MOSQUITTO_IMAGE, "-c", "rm -rf /p/* /p/.[!.]* 2>/dev/null; true"], { stdio: "ignore" });
   } catch {
     // Docker unavailable: fall through, and let rmSync report what it can't remove.
   }
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true });
 }
 
 /** Starts Postgres 17 and applies every migration in `db/migrations`. */

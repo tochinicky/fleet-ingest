@@ -95,9 +95,10 @@ export async function startBroker(name: string, extraConfig: string[] = [], pers
 }
 
 /**
- * Removes a container and its data directory if they exist. The broker writes the data directory as its own user
- * (uid 1883), which a Linux host user may not delete, so the contents go first through a root container on the same
- * image (Docker Desktop on a Mac remaps ownership and never needed it).
+ * Removes a container and its data directory if they exist. The image's entrypoint chowns the mounted `data`
+ * directory to uid 1883, and the broker writes into it as that user, which a Linux host user may not delete. So the
+ * directory goes first through a root container on the same image, with its runner-owned parent (`data/<name>`)
+ * mounted, then the parent from the host (Docker Desktop on a Mac remaps ownership and never needed it).
  */
 function removeBroker(container: string, dir: string): void {
   try {
