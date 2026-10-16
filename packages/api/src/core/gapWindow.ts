@@ -75,10 +75,21 @@ function gapsInSeries(series: Series, from: number, to: number, out: GatewayGap[
   }
 }
 
+/** A key reused with another timestamp: a producer bug (S2-6), stored as two rows since S8-2. */
+export interface KeyReuse {
+  deviceId: string;
+  gatewayId: string;
+  epoch: number;
+  seq: number;
+  measuredAt: number;
+}
+
 /** The readings of the window, per (device, epoch), and the open gaps among them. */
 export class GapWindow {
   private readonly series = new Map<string, Series>();
   private readings = 0;
+  private readonly reusesSeen = new Map<string, number>();
+  private pendingReuses: KeyReuse[] = [];
 
   /**
    * Adds stored readings. Idempotent: a reading already held (the same device, epoch and seq; re-read through the
@@ -95,7 +106,10 @@ export class GapWindow {
         this.series.set(key, series);
       }
       const at = lowerBound(series.seqs, row.seq);
-      if (series.seqs[at] === row.seq) continue;
+      if (series.seqs[at] === row.seq) {
+        if (series.measuredAt[at] !== row.measuredAt) this.noteReuse(key, row);
+        continue;
+      }
       series.seqs.splice(at, 0, row.seq);
       series.measuredAt.splice(at, 0, row.measuredAt);
       this.readings++;
@@ -118,6 +132,7 @@ export class GapWindow {
       series.measuredAt.length = kept;
       if (kept === 0) this.series.delete(key);
     }
+    for (const [reuseKey, measuredAt] of this.reusesSeen) if (measuredAt < from) this.reusesSeen.delete(reuseKey);
   }
 
   /** The open gaps among readings measured in [from, to], ordered like the SQL query's. */
@@ -125,6 +140,26 @@ export class GapWindow {
     const out: GatewayGap[] = [];
     for (const series of this.series.values()) gapsInSeries(series, from, to, out);
     return out.sort(byGatewayThenBefore);
+  }
+
+  /**
+   * Records a seq seen again with a different measured_at. Since readings' key includes measured_at (S8-2), such a
+   * reading is stored as a second row instead of being dropped; this is how it's noticed. Each (key, timestamp) is
+   * reported once, however often the cursor overlap re-reads it. The window only spans the last hour, so a key
+   * reused further apart than that goes unseen: the detector is bounded, and S8-2 says so.
+   */
+  private noteReuse(seriesKey: string, row: WindowReading): void {
+    const reuseKey = `${seriesKey}\u0000${row.seq}\u0000${row.measuredAt}`;
+    if (this.reusesSeen.has(reuseKey)) return;
+    this.reusesSeen.set(reuseKey, row.measuredAt);
+    this.pendingReuses.push({ deviceId: row.deviceId, gatewayId: row.gatewayId, epoch: row.epoch, seq: row.seq, measuredAt: row.measuredAt });
+  }
+
+  /** The key reuses noticed since the last call, each once. */
+  takeKeyReuses(): KeyReuse[] {
+    const out = this.pendingReuses;
+    this.pendingReuses = [];
+    return out;
   }
 
   /** How many readings the window holds: its memory, roughly 12 bytes each. */

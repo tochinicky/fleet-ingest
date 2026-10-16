@@ -46,6 +46,7 @@ interface HealthMetrics {
   gapWindowReadings: Gauge;
   commandsPending: Gauge<"connected">;
   commandsStuck: Gauge;
+  keyReuse: Counter<"gateway">;
 }
 
 /** Creates the job's metrics on `registry`. */
@@ -80,6 +81,10 @@ function createHealthMetrics(registry: Registry): HealthMetrics {
     gapStepSeconds: new Gauge({ name: "fleet_health_gaps_step_seconds", help: "Each step of the last gaps pass: read (the delta), window (add, prune, open gaps), explain (S7-11).", labelNames: ["step"], registers }),
     gapDeltaRows: new Gauge({ name: "fleet_health_gap_delta_rows", help: "Rows the last gaps pass read behind its cursor, overlap included (S7-11).", registers }),
     gapWindowReadings: new Gauge({ name: "fleet_health_gap_window_readings", help: "Readings held in memory for the last hour's open gaps, about 12 bytes each (S7-11).", registers }),
+    keyReuse: new Counter({
+      name: "fleet_reading_key_reuse_total", labelNames: ["gateway"], registers,
+      help: "Readings whose (device, epoch, seq) was seen again within the hour with another measured_at: a producer bug, stored as two rows (S8-2).",
+    }),
     failures: new Counter({
       name: "fleet_health_job_failures_total", labelNames: ["part", "reason"], registers,
       help: "Health-job parts that failed, by reason: timeout (the database didn't answer in time) or error. The pass stops there (S7-10).",
@@ -98,6 +103,8 @@ async function updateHealth(pool: pg.Pool, metrics: HealthMetrics, now: Date): P
     }, now);
     states.set(row.gatewayId, state);
     metrics.gatewayOffline.labels(row.gatewayId).set(state === "offline" ? 1 : 0);
+    // At 0 before any reuse: a counter series that first appears at 1 has no increase() for the alert to see.
+    metrics.keyReuse.labels(row.gatewayId).inc(0);
   }
   for (const state of ["online", "offline", "unknown"]) metrics.gatewaysByState.labels(state).set([...states.values()].filter((s) => s === state).length);
   const commands = gatewayRows.map((row) => ({ online: states.get(row.gatewayId) === "online", ...commandOf(row, states.get(row.gatewayId) ?? "unknown", now) }));
@@ -256,6 +263,7 @@ async function updateGaps(pool: pg.Pool, metrics: HealthMetrics, tracker: GapTra
   metrics.gapDeltaRows.set(delta.length);
   tracker.window.add(delta, from);
   tracker.window.prune(from);
+  for (const reuse of tracker.window.takeKeyReuses()) metrics.keyReuse.labels(reuse.gatewayId).inc();
   tracker.cursor = advanceCursor(tracker.cursor, delta.map((r) => r.storedAt));
   const open = tracker.window.openGaps(from, nowMs);
   step("window");

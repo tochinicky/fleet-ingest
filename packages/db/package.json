@@ -2,17 +2,21 @@
   "name": "@fleet-ingest/db",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "migrate": "node src/main.ts"
   },
   "dependencies": {
+    "@fleet-ingest/observability": "workspace:*",
     "pg": "8.23.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "12.2.0",
     "@types/pg": "8.23.1",
+    "fast-check": "4.10.2",
     "testcontainers": "12.2.0"
   }
 }

@@ -100,3 +100,25 @@ describe("gapsOf (the oracle)", () => {
     expect(gapsOf([r(1, 10), r(2, 11), r(3, 12)], at(0), at(100))).toEqual([]);
   });
 });
+
+describe("GapWindow's key-reuse detector (S8-2)", () => {
+  const r = (seq: number, measuredAt: number): WindowReading => ({ deviceId: "d-1", gatewayId: "gw-a", epoch: 1, seq, measuredAt });
+
+  it("reports a seq seen again with another timestamp, once, however often the overlap re-reads it", () => {
+    const window = new GapWindow();
+    window.add([r(1, 1000), r(2, 2000)], 0);
+    window.add([r(2, 2000)], 0);
+    expect(window.takeKeyReuses()).toEqual([]);
+    window.add([r(2, 2500)], 0);
+    expect(window.takeKeyReuses()).toEqual([{ deviceId: "d-1", gatewayId: "gw-a", epoch: 1, seq: 2, measuredAt: 2500 }]);
+    window.add([r(2, 2500), r(2, 2000)], 0);
+    expect(window.takeKeyReuses()).toEqual([]);
+  });
+
+  it("never reports the same seq in another epoch: that's a power loss, not a reuse", () => {
+    const window = new GapWindow();
+    window.add([r(1, 1000), { ...r(1, 5000), epoch: 2 }], 0);
+    expect(window.takeKeyReuses()).toEqual([]);
+  });
+});
+

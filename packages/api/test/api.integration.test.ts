@@ -7,7 +7,7 @@ import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyMigrations, loadMigrations, MIGRATIONS_DIR } from "@fleet-ingest/db";
+import { applyMigrations, ensurePartitions, loadMigrations, MIGRATIONS_DIR } from "@fleet-ingest/db";
 import { createRegistry } from "@fleet-ingest/observability";
 import { buildApp } from "../src/app.ts";
 import { gapsOf } from "../src/core/gapWindow.ts";
@@ -87,6 +87,8 @@ beforeAll(async () => {
   pool = new pg.Pool({ connectionString: container.getConnectionUri() });
   const client = await pool.connect();
   await applyMigrations(client, loadMigrations(MIGRATIONS_DIR));
+  // The seed's fixed dates need their days to exist: readings has no default partition (S8-2).
+  await ensurePartitions(client, new Date("2026-10-01T00:00:00Z"), new Date(Date.now() + 14 * 86_400_000));
   client.release();
   await seed();
   reconciler = startCommandReconciler({ pool, commands, onError: () => {}, intervalMs: 3600_000 });

@@ -17,6 +17,7 @@ import { ActivityCounters } from "./core/activityCounters.ts";
 import { startSubscriber } from "./adapters/mqttSubscriber.ts";
 import type { Delivery, Subscriber } from "./adapters/mqttSubscriber.ts";
 import { openIngestPool } from "./adapters/databasePool.ts";
+import { assertPartitionsCover } from "./adapters/partitionCheck.ts";
 import { createPostgresStore } from "./adapters/postgresStore.ts";
 import type { ItemOutcome, StoreItem } from "./adapters/postgresStore.ts";
 import { createIngestPipeline } from "./ingestPipeline.ts";
@@ -79,6 +80,7 @@ function buildPipeline(config: Config, runtime: Runtime, counters: ActivityCount
     {
       batch: { maxRows: config.BATCH_MAX_ROWS, maxWaitMs: config.BATCH_MAX_WAIT_MS },
       backoff: { baseMs: config.RETRY_BASE_MS, capMs: config.RETRY_CAP_MS },
+      retentionDays: config.RETENTION_DAYS,
     },
     systemClock,
     {
@@ -121,6 +123,7 @@ async function main(): Promise<void> {
   const log = pino({ level: config.LOG_LEVEL, base: { service: "ingest", clientId: config.MQTT_CLIENT_ID } });
   log.info({ sinceProcessStartMs: Math.round(performance.now()) }, "starting");
   const pool = openIngestPool({ url: config.DATABASE_URL, size: config.DATABASE_POOL_SIZE }, (error) => log.warn({ err: error }, "idle database connection failed"));
+  await assertPartitionsCover(pool, config.RETENTION_DAYS, new Date());
   const runtime: Runtime = { log, pool, subscriber: undefined, shuttingDown: false };
   const counters = new ActivityCounters();
   const registry = createRegistry("ingest");

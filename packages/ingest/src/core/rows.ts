@@ -48,6 +48,8 @@ export interface DeadLetterRow {
  * - `invalid_json` / `schema_mismatch`: the payload failed decoding.
  * - `device_id_mismatch`: the payload names a different device from the topic.
  * - `future_timestamp`: the timestamp is more than 5 minutes ahead of ingest's clock (a broken clock).
+ * - `too_old`: the reading was measured before what retention keeps, so it has no partition to go to (S8-2). It's
+ *   real data loss for a very long outage, so it's counted, alerted (ReadingsTooOld) and stated in the guarantee.
  * - `foreign_device`: the device is already bound to a different gateway (D6).
  * - `rejected_by_database`: Postgres refused the row (a data or constraint error).
  */
@@ -57,5 +59,6 @@ export type DeadLetterReason =
   | "schema_mismatch"
   | "device_id_mismatch"
   | "future_timestamp"
+  | "too_old"
   | "foreign_device"
   | "rejected_by_database";

@@ -7,7 +7,17 @@
 # - fleet-sim doesn't start (it's in the `sim` profile): real gateways send the data. cAdvisor stays, because its
 #   cross-check of the broker's memory matters more in production, not less.
 # - Secrets have no defaults: API_TOKEN and GRAFANA_ADMIN_PASSWORD must be set, and Grafana has no anonymous viewer.
+# - Readings are kept 30 days, not the lab's 7 (S8-2): a product decision. Every service that reads RETENTION_DAYS
+#   gets the same value, because ingest's too_old cutoff and the partition window must agree.
 services:
+  migrate:
+    environment: { RETENTION_DAYS: "${RETENTION_DAYS:-30}" }
+  partitions:
+    environment: { RETENTION_DAYS: "${RETENTION_DAYS:-30}" }
+  ingest-1:
+    environment: { RETENTION_DAYS: "${RETENTION_DAYS:-30}" }
+  ingest-2:
+    environment: { RETENTION_DAYS: "${RETENTION_DAYS:-30}" }
   caddy:
     image: caddy:2.11.4-alpine
     environment:

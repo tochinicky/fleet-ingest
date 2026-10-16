@@ -83,7 +83,7 @@ function setup(maxRows = 3, maxWaitMs = 200) {
   const retries: number[] = [];
   const fatal: IngestError[] = [];
   const events: PipelineEvents = { batchCommitted: () => {}, itemStored: () => {}, retrying: (_e, _a, delay) => retries.push(delay) };
-  const pipeline = createIngestPipeline(store, { batch: { maxRows, maxWaitMs }, backoff: { baseMs: 200, capMs: 30_000 } }, clock, events, (e) => fatal.push(e));
+  const pipeline = createIngestPipeline(store, { batch: { maxRows, maxWaitMs }, backoff: { baseMs: 200, capMs: 30_000 }, retentionDays: 30 }, clock, events, (e) => fatal.push(e));
   return { store, clock, acked, retries, fatal, pipeline };
 }
 

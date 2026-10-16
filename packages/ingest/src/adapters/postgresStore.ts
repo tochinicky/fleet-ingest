@@ -4,7 +4,7 @@
  * of round trips, not 2,000.
  *
  * The rules that make delivery order irrelevant live here:
- * - **dedup:** a reading is stored once per (device_id, epoch, seq) (`ON CONFLICT DO NOTHING`, D4);
+ * - **dedup:** a reading is stored once per (device_id, epoch, seq, measured_at) (`ON CONFLICT DO NOTHING`, D4, S8-2);
  * - **newer-only state:** `device_state` only moves forward on (measured_at, epoch, seq) (D4);
  * - **newer-only status:** gateway status only moves forward on `last_status_at` (S2-2);
  * - **device binding:** a device belongs to the first gateway it appeared under (D6).
@@ -69,8 +69,8 @@ const INSERT_READINGS = `
                         pv_power_w, battery_power_w, grid_power_w, ev_power_w, energy_wh, soc_percent, charge_limit_a)
   SELECT * FROM ${READING_UNNEST}
   ORDER BY device_id, epoch, seq
-  ON CONFLICT (device_id, epoch, seq) DO NOTHING
-  RETURNING device_id, epoch::text, seq::text`;
+  ON CONFLICT (device_id, epoch, seq, measured_at) DO NOTHING
+  RETURNING device_id, epoch::text, seq::text, (extract(epoch FROM measured_at) * 1000)::bigint::text AS measured_ms`;
 
 /**
  * Newer-only (D4). Within the batch, only each device's newest reading is a candidate (`DISTINCT ON`, ordered by
@@ -134,9 +134,13 @@ function readingArrays(rows: ReadingRow[]): unknown[][] {
   ];
 }
 
-/** The dedup key of a reading, as a string. */
-function readingKey(deviceId: string, epoch: number | string, seq: number | string): string {
-  return `${deviceId}\u0000${epoch}\u0000${seq}`;
+/**
+ * The dedup key of a reading, as a string: (device_id, epoch, seq, measured_at), the primary key since readings is
+ * partitioned on measured_at (S8-2). With measured_at in it, a key reused with another timestamp counts as its own
+ * insert even within one batch.
+ */
+function readingKey(deviceId: string, epoch: number | string, seq: number | string, measuredMs: number | string): string {
+  return `${deviceId}\u0000${epoch}\u0000${seq}\u0000${measuredMs}`;
 }
 
 /**
@@ -196,9 +200,9 @@ async function writeReadings(client: pg.PoolClient, readings: ReadingRow[]): Pro
   if (readings.length === 0) return new Set();
   await registerGateways(client, readings);
   const arrays = readingArrays(readings);
-  const inserted = await client.query<{ device_id: string; epoch: string; seq: string }>(INSERT_READINGS, arrays);
+  const inserted = await client.query<{ device_id: string; epoch: string; seq: string; measured_ms: string }>(INSERT_READINGS, arrays);
   await client.query(UPSERT_DEVICE_STATE, arrays);
-  return new Set(inserted.rows.map((r) => readingKey(r.device_id, r.epoch, r.seq)));
+  return new Set(inserted.rows.map((r) => readingKey(r.device_id, r.epoch, r.seq, r.measured_ms)));
 }
 
 /** Applies one status, newer-only. */
@@ -260,7 +264,7 @@ async function writeOne(client: pg.PoolClient, item: StoreItem, bindings: Map<st
     await writeDeadLetter(client, { topic: item.topic, payload: item.payload, reason: "foreign_device", detail, receivedAt: routed.row.receivedAt });
     return { kind: "dead_letter", reason: "foreign_device", detail };
   }
-  const key = readingKey(routed.row.deviceId, routed.row.epoch, routed.row.seq);
+  const key = readingKey(routed.row.deviceId, routed.row.epoch, routed.row.seq, routed.row.measuredAt.getTime());
   if (!newKeys.delete(key)) return { kind: "duplicate" };
   return { kind: "inserted" };
 }

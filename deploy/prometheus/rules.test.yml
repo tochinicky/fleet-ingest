@@ -177,3 +177,62 @@ tests:
       - eval_time: 8m
         alertname: DBWriteErrors
         exp_alerts: []
+
+  - name: ReadingKeyReused fires per gateway on one reuse, and resolves once the 15 min have passed
+    interval: 1m
+    input_series:
+      - series: 'fleet_reading_key_reuse_total{gateway="gw-a", instance="api:9465"}'
+        values: '0x3 1x30'
+      - series: 'fleet_reading_key_reuse_total{gateway="gw-b", instance="api:9465"}'
+        values: '0x33'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ReadingKeyReused
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ReadingKeyReused
+        exp_alerts:
+          - exp_labels: { severity: warning, gateway: gw-a }
+            exp_annotations:
+              summary: "Gateway gw-a reused a reading key with a different timestamp: both readings are stored"
+              runbook: docs/runbooks.md#reading-key-reused-alert-readingkeyreused
+      - eval_time: 25m
+        alertname: ReadingKeyReused
+        exp_alerts: []
+
+  - name: ReadingsTooOld fires on a single too_old dead letter, and not on other reasons
+    interval: 30s
+    input_series:
+      - series: 'ingest_dead_letters_total{reason="too_old", instance="ingest-1:9464"}'
+        values: '0x4 1x20'
+      - series: 'ingest_dead_letters_total{reason="invalid_json", instance="ingest-1:9464"}'
+        values: '0+5x24'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ReadingsTooOld
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ReadingsTooOld
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Readings older than retention are being rejected: a gateway replayed data measured before what is kept"
+              runbook: docs/runbooks.md#readings-too-old-alert-readingstooold
+
+  - name: PartitionsRunningOut fires when fewer than 2 days are ahead for 10 minutes
+    interval: 1m
+    input_series:
+      - series: 'fleet_partitions_ahead_days{instance="partitions:9466"}'
+        values: '7x5 1x15'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PartitionsRunningOut
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: PartitionsRunningOut
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: "partitions:9466" }
+            exp_annotations:
+              summary: "Only 1 day(s) of readings partitions exist ahead: maintenance isn't creating them"
+              runbook: docs/runbooks.md#partitions-running-out-alerts-partitionsrunningout-partitionmaintenancestale
+

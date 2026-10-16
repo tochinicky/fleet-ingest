@@ -5,7 +5,7 @@
  * device a `foreign_device` poison names is already bound to its own gateway.
  *
  * PASS means:
- * - each of the five kinds is in `dead_letters` with the matching reason;
+ * - each of the six kinds is in `dead_letters` with the matching reason (too_old since S8-2);
  * - no poison was stored as a reading (their seqs are all ≥ 900,000,000);
  * - every acknowledged real reading is stored;
  * - throughput is unaffected: readings inserted per second during the poison is no more than 20% below before. Only a
@@ -20,7 +20,7 @@ import {
 
 const GATEWAYS = 500;
 const POISON_SECONDS = 90;
-const REASONS = ["invalid_json", "schema_mismatch", "device_id_mismatch", "future_timestamp", "foreign_device"];
+const REASONS = ["invalid_json", "schema_mismatch", "device_id_mismatch", "future_timestamp", "too_old", "foreign_device"];
 const INSERT_RATE = 'sum(rate(ingest_readings_stored_total{outcome="inserted"}[1m]))';
 
 /** Runs the scenario and prints its verdicts. */

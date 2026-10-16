@@ -9,7 +9,7 @@
 import type { TelemetryMessage } from "@fleet-ingest/contract";
 
 /** The poison kinds, named after the dead-letter reason each one must produce. */
-export const POISON_KINDS = ["invalid_json", "schema_mismatch", "device_id_mismatch", "future_timestamp", "foreign_device"] as const;
+export const POISON_KINDS = ["invalid_json", "schema_mismatch", "device_id_mismatch", "future_timestamp", "too_old", "foreign_device"] as const;
 
 /** One poison kind. */
 export type PoisonKind = (typeof POISON_KINDS)[number];
@@ -99,6 +99,9 @@ export interface RawMessage {
   payload: string;
 }
 
+/** How far back a `too_old` poison is stamped: 400 days, older than any retention ingest accepts (S8-2). */
+export const TOO_OLD_AGE_MS = 400 * 86_400_000;
+
 /**
  * Builds one poison message from a real reading, without reusing its key: the seq is far outside any real one
  * (`900_000_000 + seq`), so a poison that ingest wrongly accepted would show up as an outlier, never as a duplicate.
@@ -108,6 +111,7 @@ export interface RawMessage {
  * - `future_timestamp`: stamped 10 minutes ahead (a broken clock). Ingest dead-letters anything more than 5 minutes
  *   ahead of its own clock (D7, `MAX_FUTURE_SKEW_MS` in `packages/ingest/src/core/routeMessage.ts`), so this clears the limit by 5 minutes;
  *   change one, check the other;
+ * - `too_old`: stamped {@link TOO_OLD_AGE_MS} back, before what retention keeps; ingest dead-letters it (S8-2);
  * - `foreign_device`: a device ID that belongs to `foreignDeviceId`'s gateway, under this gateway's topic. That device
  *   must already be bound to its own gateway: a poison sent before then would bind it here instead (ingest binds a
  *   device on its first reading, D6), so scenario 5 turns poison on only once every gateway is delivering.
@@ -123,6 +127,8 @@ export function poisonMessage(kind: PoisonKind, reading: TelemetryMessage, forei
       return { topicDeviceId: reading.deviceId, payload: JSON.stringify({ ...fake, deviceId: `${reading.deviceId}-other` }) };
     case "future_timestamp":
       return { topicDeviceId: reading.deviceId, payload: JSON.stringify({ ...fake, timestamp: new Date(now.getTime() + 600_000).toISOString() }) };
+    case "too_old":
+      return { topicDeviceId: reading.deviceId, payload: JSON.stringify({ ...fake, timestamp: new Date(now.getTime() - TOO_OLD_AGE_MS).toISOString() }) };
     case "foreign_device":
       return { topicDeviceId: foreignDeviceId, payload: JSON.stringify({ ...fake, deviceId: foreignDeviceId }) };
   }

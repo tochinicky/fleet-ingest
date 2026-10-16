@@ -2,6 +2,7 @@
  * Ingest's configuration, read from the environment once at startup and validated with zod. Code past `main.ts`
  * only ever sees the typed result, never `process.env`.
  */
+import { RETENTION_FLOOR_DAYS } from "@fleet-ingest/db";
 import { z } from "zod";
 
 /** Every setting, its default, and what it's for. */
@@ -23,6 +24,11 @@ const configSchema = z.object({
   KEEPALIVE_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(50).default(4),
+  /**
+   * Days of readings kept (S8-2); older readings are dead-lettered as too_old. At least the retention floor (4 days:
+   * the oldest reading a gateway can replay with one device online, plus margin), checked here at startup.
+   */
+  RETENTION_DAYS: z.coerce.number().int().min(RETENTION_FLOOR_DAYS).default(30),
   /** A batch is written at this many rows... (D5) */
   BATCH_MAX_ROWS: z.coerce.number().int().min(1).max(5000).default(500),
   /** ...or this long after its oldest message arrived, whichever comes first (D5). */

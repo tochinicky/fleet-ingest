@@ -79,11 +79,23 @@ services:
   migrate:
     <<: *node
     command: ["node", "packages/db/src/main.ts"]
-    environment:
+    environment: &partition-env
       DATABASE_URL: postgres://fleet:fleet-dev-only@postgres:5432/fleet
+      # How many days of readings are kept (S8-2): a small window in the lab, for disk. Ingest reads the same value.
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+      PARTITIONS_AHEAD_DAYS: ${PARTITIONS_AHEAD_DAYS:-7}
     depends_on:
       postgres: { condition: service_healthy }
     restart: "no"
+
+  # The single writer of readings' daily partitions: creates the days ahead, drops what retention no longer keeps.
+  partitions:
+    <<: *node
+    command: ["node", "packages/db/src/main.ts", "maintain"]
+    environment: *partition-env
+    restart: always
+    depends_on:
+      migrate: { condition: service_completed_successfully }
 
   # Two replicas with fixed client IDs (D2): a killed replica comes back as itself and resumes its session.
   ingest-1:
@@ -97,6 +109,7 @@ services:
       MQTT_KEY_FILE: /certs/ingest-1.key
       # Through toxiproxy, so the scenarios can cut or slow the database for ingest only.
       DATABASE_URL: postgres://fleet:fleet-dev-only@toxiproxy:15432/fleet
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
 
   ingest-2:
     <<: *ingest

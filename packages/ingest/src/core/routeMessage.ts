@@ -5,6 +5,7 @@
  * transaction as the write.
  */
 import { decodeStatus, decodeTelemetry, parseTopic } from "@fleet-ingest/contract";
+import { acceptedSince } from "@fleet-ingest/db";
 import type { GatewayStatus, TelemetryMessage } from "@fleet-ingest/contract";
 import type { DeadLetterReason, DeadLetterRow, ReadingRow, StatusRow } from "./rows.ts";
 
@@ -32,8 +33,12 @@ function futureSkew(at: Date, receivedAt: Date): string | null {
   return aheadMs > MAX_FUTURE_SKEW_MS ? `timestamp is ${Math.round(aheadMs / 1000)} s ahead of ingest's clock` : null;
 }
 
-/** Routes one message. Never throws: anything it can't make sense of becomes a dead letter with a reason. */
-export function routeMessage(topic: string, payload: Uint8Array, receivedAt: Date): Routed {
+/**
+ * Routes one message. Never throws: anything it can't make sense of becomes a dead letter with a reason.
+ * `retentionDays` sets the oldest reading that still has a partition: anything measured before
+ * {@link acceptedSince} is `too_old` (S8-2). Statuses aren't partitioned and have no such limit.
+ */
+export function routeMessage(topic: string, payload: Uint8Array, receivedAt: Date, retentionDays: number): Routed {
   const parsed = parseTopic(topic);
   if (parsed.kind === "unknown") return deadLetter(topic, payload, receivedAt, "unknown_topic", null);
   if (parsed.kind === "status") return routeStatus(topic, payload, receivedAt, parsed.gatewayId);
@@ -44,7 +49,12 @@ export function routeMessage(topic: string, payload: Uint8Array, receivedAt: Dat
   }
   const row = toReadingRow(parsed.gatewayId, decoded.value, receivedAt);
   const skew = futureSkew(row.measuredAt, receivedAt);
-  return skew ? deadLetter(topic, payload, receivedAt, "future_timestamp", skew) : { type: "reading", row };
+  if (skew) return deadLetter(topic, payload, receivedAt, "future_timestamp", skew);
+  const oldest = acceptedSince(receivedAt, retentionDays);
+  if (row.measuredAt < oldest) {
+    return deadLetter(topic, payload, receivedAt, "too_old", `measured ${row.measuredAt.toISOString()}; retention keeps readings from ${oldest.toISOString()}`);
+  }
+  return { type: "reading", row };
 }
 
 /**

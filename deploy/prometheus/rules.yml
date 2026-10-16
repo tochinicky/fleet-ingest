@@ -47,6 +47,15 @@ groups:
         annotations:
           summary: "{{ $value }} online gateway(s) haven't applied their desired mode within 5 min"
           runbook: docs/runbooks.md#command-not-applied-alert-commandnotapplied
+      - alert: ReadingKeyReused
+        # A gateway sent two different readings with one (device, epoch, seq): a producer bug (S2-6). Since S8-2 the key
+        # includes measured_at, so both are stored; this is how anyone finds out. Seen only within the gap window's hour.
+        expr: sum by (gateway) (increase(fleet_reading_key_reuse_total[15m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Gateway {{ $labels.gateway }} reused a reading key with a different timestamp: both readings are stored"
+          runbook: docs/runbooks.md#reading-key-reused-alert-readingkeyreused
+
       - alert: SLOBurnFast
         # The budget is 1%. A burn rate of 14.4 over 1 h (confirmed over 5 min) would use 2% of a 30-day budget in an hour.
         expr: (1 - fleet:slo_good_ratio:1h) > 14.4 * 0.01 and (1 - fleet:slo_good_ratio:5m) > 14.4 * 0.01
@@ -118,6 +127,31 @@ groups:
         annotations:
           summary: "Messages are being dead-lettered (reason {{ $labels.reason }})"
           runbook: docs/runbooks.md#dead-letters-appearing-alert-deadlettersappearing
+      - alert: ReadingsTooOld
+        # A too_old dead letter is a reading lost for good: measured before what retention keeps (S8-2). One is enough
+        # to page, unlike the other dead-letter reasons, because it means a gateway was away longer than retention.
+        expr: sum(increase(ingest_dead_letters_total{reason="too_old"}[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Readings older than retention are being rejected: a gateway replayed data measured before what is kept"
+          runbook: docs/runbooks.md#readings-too-old-alert-readingstooold
+
+  - name: partitions
+    rules:
+      - alert: PartitionsRunningOut
+        # Inserts need today's and tomorrow's partitions; maintenance keeps a week ahead (S8-2).
+        expr: fleet_partitions_ahead_days < 2
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Only {{ $value }} day(s) of readings partitions exist ahead: maintenance isn't creating them"
+          runbook: docs/runbooks.md#partitions-running-out-alerts-partitionsrunningout-partitionmaintenancestale
+      - alert: PartitionMaintenanceStale
+        expr: time() - fleet_partitions_last_success_timestamp_seconds > 3 * 3600 and fleet_partitions_last_success_timestamp_seconds > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Partition maintenance hasn't completed a pass for 3 hours"
+          runbook: docs/runbooks.md#partitions-running-out-alerts-partitionsrunningout-partitionmaintenancestale
 
   - name: broker
     rules:

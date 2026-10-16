@@ -7,10 +7,15 @@ import { Counter, Gauge, Histogram } from "@fleet-ingest/observability";
 import type { Registry } from "@fleet-ingest/observability";
 import type { DeadLetterReason } from "../core/rows.ts";
 
-/** Every dead-letter reason, so each counter series exists at 0 from startup (see `#initialiseLabels`). */
-const DEAD_LETTER_REASONS: DeadLetterReason[] = [
-  "unknown_topic", "invalid_json", "schema_mismatch", "device_id_mismatch", "future_timestamp", "foreign_device", "rejected_by_database",
-];
+/**
+ * Every dead-letter reason, so each counter series exists at 0 from startup (see `#initialiseLabels`). A record, not
+ * a list, so a reason added to {@link DeadLetterReason} and left out here fails the typecheck: a missing one would
+ * make its first dead letter invisible to `increase()` and to the alerts (S8-2's `too_old` was nearly that).
+ */
+const DEAD_LETTER_REASONS = Object.keys({
+  unknown_topic: true, invalid_json: true, schema_mismatch: true, device_id_mismatch: true, future_timestamp: true,
+  foreign_device: true, rejected_by_database: true, too_old: true,
+} satisfies Record<DeadLetterReason, true>) as DeadLetterReason[];
 
 /** Seconds: from tens of milliseconds to the 30 s retry cap and beyond, for lag-like histograms. */
 const LAG_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 3600];

@@ -64,6 +64,7 @@ describe("classifyDatabaseError", () => {
     [new Error("query failed", { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) }), "retryable"],
     [{ code: "22003" }, "poison"],
     [{ code: "23514" }, "poison"],
+    [Object.assign(new Error('no partition of relation "readings" found for row'), { code: "23514" }), "retryable"],
     [{ code: "42P01" }, "fatal"],
     [new Error("something else"), "fatal"],
     ["not an error at all", "fatal"],
@@ -72,9 +73,12 @@ describe("classifyDatabaseError", () => {
   });
 });
 
+/** The retention every routing test uses unless it tests retention itself. */
+const RETENTION = 30;
+
 describe("routeMessage", () => {
   it("turns a valid reading into a row, with absent measurements as null", () => {
-    const routed = routeMessage("homes/gw-1/devices/dev-1/telemetry", json(reading), receivedAt);
+    const routed = routeMessage("homes/gw-1/devices/dev-1/telemetry", json(reading), receivedAt, RETENTION);
     expect(routed).toEqual({
       type: "reading",
       row: {
@@ -86,19 +90,31 @@ describe("routeMessage", () => {
   });
 
   it("uses the receive time for the Last Will, which has no timestamp", () => {
-    const routed = routeMessage("homes/gw-1/status", json({ state: "offline" }), receivedAt);
+    const routed = routeMessage("homes/gw-1/status", json({ state: "offline" }), receivedAt, RETENTION);
     expect(routed).toMatchObject({ type: "status", row: { gatewayId: "gw-1", state: "offline", statusAt: receivedAt, buffered: null } });
   });
 
   it("dead-letters a reading more than 5 minutes ahead of ingest's clock, but accepts one just inside", () => {
     const at = (ms: number) => json({ ...reading, timestamp: new Date(receivedAt.getTime() + ms).toISOString() });
-    expect(routeMessage("homes/gw-1/devices/dev-1/telemetry", at(5 * 60_000 + 1000), receivedAt)).toMatchObject({ type: "dead_letter", row: { reason: "future_timestamp" } });
-    expect(routeMessage("homes/gw-1/devices/dev-1/telemetry", at(5 * 60_000 - 1000), receivedAt)).toMatchObject({ type: "reading" });
+    expect(routeMessage("homes/gw-1/devices/dev-1/telemetry", at(5 * 60_000 + 1000), receivedAt, RETENTION)).toMatchObject({ type: "dead_letter", row: { reason: "future_timestamp" } });
+    expect(routeMessage("homes/gw-1/devices/dev-1/telemetry", at(5 * 60_000 - 1000), receivedAt, RETENTION)).toMatchObject({ type: "reading" });
+  });
+
+  it("dead-letters a reading measured before what retention keeps as too_old, and accepts one at the cutoff (S8-2)", () => {
+    const at = (iso: string) => json({ ...reading, timestamp: iso });
+    // receivedAt is 2026-10-14T12:00Z; with 4 days kept, ingest accepts from 2026-10-11T00:00Z (T - (D - 1)).
+    expect(routeMessage("homes/gw-1/devices/dev-1/telemetry", at("2026-10-10T23:59:59.999Z"), receivedAt, 4)).toMatchObject({ type: "dead_letter", row: { reason: "too_old" } });
+    expect(routeMessage("homes/gw-1/devices/dev-1/telemetry", at("2026-10-11T00:00:00.000Z"), receivedAt, 4)).toMatchObject({ type: "reading" });
+  });
+
+  it("never applies retention to a status: gateway status isn't partitioned", () => {
+    const status = json({ state: "online", timestamp: "2026-01-01T00:00:00Z" });
+    expect(routeMessage("homes/gw-1/status", status, receivedAt, 4)).toMatchObject({ type: "status" });
   });
 
   it("dead-letters a status from a broken clock too, so it can't freeze the gateway's status", () => {
     const status = json({ state: "online", timestamp: new Date(receivedAt.getTime() + 3600_000).toISOString() });
-    expect(routeMessage("homes/gw-1/status", status, receivedAt)).toMatchObject({ type: "dead_letter", row: { reason: "future_timestamp" } });
+    expect(routeMessage("homes/gw-1/status", status, receivedAt, RETENTION)).toMatchObject({ type: "dead_letter", row: { reason: "future_timestamp" } });
   });
 
   it.each([
@@ -108,6 +124,6 @@ describe("routeMessage", () => {
     ["a device mismatch", "homes/gw-1/devices/dev-2/telemetry", json(reading), "device_id_mismatch"],
     ["a bad status", "homes/gw-1/status", json({ state: "sleeping" }), "schema_mismatch"],
   ])("dead-letters %s", (_label, topic, payload, reason) => {
-    expect(routeMessage(topic, payload, receivedAt)).toMatchObject({ type: "dead_letter", row: { topic, reason, receivedAt } });
+    expect(routeMessage(topic, payload, receivedAt, RETENTION)).toMatchObject({ type: "dead_letter", row: { topic, reason, receivedAt } });
   });
 });

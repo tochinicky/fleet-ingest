@@ -11,7 +11,7 @@ import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 import pg from "pg";
-import { applyMigrations, loadMigrations, MIGRATIONS_DIR } from "@fleet-ingest/db";
+import { applyMigrations, ensurePartitions, loadMigrations, MIGRATIONS_DIR } from "@fleet-ingest/db";
 
 export const POSTGRES_IMAGE = "postgres:17.11-alpine";
 export const MOSQUITTO_IMAGE = "eclipse-mosquitto:2.1.2-alpine";
@@ -49,12 +49,19 @@ export function removeBrokerDataDir(parent: string): void {
   rmSync(parent, { recursive: true, force: true });
 }
 
-/** Starts Postgres 17 and applies every migration in `db/migrations`. */
+/**
+ * The days the tests store readings for: their fixed dates (2026-10-01 to 2026-10-14) through two weeks from now.
+ * A partitioned `readings` has no default partition (S8-2), so a test date needs its day to exist.
+ */
+export const TEST_PARTITIONS_FROM = new Date("2026-10-01T00:00:00Z");
+
+/** Starts Postgres 17, applies every migration in `db/migrations`, and creates the partitions the tests need. */
 export async function startMigratedPostgres(): Promise<StartedPostgreSqlContainer> {
   const container = await new PostgreSqlContainer(POSTGRES_IMAGE).start();
   const client = new pg.Client({ connectionString: container.getConnectionUri() });
   await client.connect();
   await applyMigrations(client, loadMigrations(MIGRATIONS_DIR));
+  await ensurePartitions(client, TEST_PARTITIONS_FROM, new Date(Date.now() + 14 * 86_400_000));
   await client.end();
   return container;
 }

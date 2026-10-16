@@ -45,6 +45,8 @@ export interface PipelineEvents {
 export interface PipelineSettings {
   batch: BatchSettings;
   backoff: BackoffSettings;
+  /** How many days of readings are kept; older ones are dead-lettered as too_old (S8-2). */
+  retentionDays: number;
 }
 
 /** A running pipeline. */
@@ -123,7 +125,7 @@ export function createIngestPipeline(
   return {
     enqueue: (delivery) => {
       if (state.stopping || state.failed) return;
-      const routed = routeMessage(delivery.topic, delivery.payload, delivery.receivedAt);
+      const routed = routeMessage(delivery.topic, delivery.payload, delivery.receivedAt, settings.retentionDays);
       batcher.add({ delivery, item: { routed, topic: delivery.topic, payload: delivery.payload } }, clock.now());
       kick();
     },

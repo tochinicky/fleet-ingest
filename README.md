@@ -16,9 +16,10 @@ Built in slices; every decision and finding is in [`docs/decisions.md`](docs/dec
 | 3 | Backpressure and retries: batches of 500 / 200 ms, full-jitter backoff, poison isolation, toxiproxy, scenarios 3a, 3b and 7 | done |
 | 4 | Identity: per-gateway certificates (mTLS), ACL by CN, CRL revocation, device binding, threat list, gateway TLS, scenario 6 | done |
 | 5 | Health: evidence-based online/offline/unknown, stale devices, gaps per epoch (explained by droppedTelemetry), commands, scenarios 2 and 8 | done |
-| 6a | Operability: metrics, broker exporter, alerts with runbooks (14 then; 16 today), SLO with burn-rate alerts, Grafana dashboard | done |
+| 6a | Operability: metrics, broker exporter, alerts with runbooks (14 then; 20 today), SLO with burn-rate alerts, Grafana dashboard | done |
 | 6b | Load numbers at 500 gateways, scenario 4, exact 3b accounting, persist-sqlite experiment | done |
 | 7 | Ship: commands as desired state (reconciler), lint and CI, Terraform (plan only), production profile, the real gateway end to end, demo.sh; persist-sqlite adopted (S7-7); database hangs and dropped connections survived (S7-9, S7-10); fleet-wide reads without whole-table scans (S7-11); clean reruns on a lab VM (S7-12) | done |
+| 8 | Close the open items: cold starts re-measured (S8-1), `readings` partitioned by day with retention (S8-2); next a health worker, a gap-explanation checkpoint, revocation without a restart, always-on deployment | in progress |
 
 ## Run it
 
@@ -53,14 +54,15 @@ scripts/demo.sh                              # every scenario (1–9): PASS, FAI
 
 At-least-once on the wire, exactly-once in Postgres, by construction:
 - a reading is acknowledged only after its write commits;
-- it's stored under the primary key `(device_id, epoch, seq)`.
+- it's stored under the primary key `(device_id, epoch, seq, measured_at)`. A redelivery is the same bytes, timestamp included, so it meets its first copy and is dropped ([`decisions.md` S8-2](docs/decisions.md)).
 
 The backpressure chain is: database slow → no COMMIT → no PUBACK → Receive Maximum reached → the broker queues, up to its bound (about 10 minutes of traffic) → past the bound, drops are counted. The gateway's own buffer covers losing the internet only, because the broker acknowledges a gateway as soon as it receives a message.
 
 **No loss, unless:**
 - the broker crashes (SIGKILL, OOM) while a backlog exists, which loses up to 5 s of queue: persistence is the persist-sqlite plugin, which commits every 5 s ([`decisions.md` S6-15, S7-7](docs/decisions.md));
 - or the backlog outgrows the bound, in which case the drops are counted and alerted;
-- or the broker is brand new, or an ingest session has expired after 7 days, so nothing is queued until ingest subscribes (see [`docs/runbooks.md`](docs/runbooks.md)).
+- or the broker is brand new, or an ingest session has expired after 7 days, so nothing is queued until ingest subscribes (see [`docs/runbooks.md`](docs/runbooks.md));
+- or a reading is older than retention (30 days in production): readings older than retention are rejected, counted and alerted, with the raw payload kept in the dead-letter table ([`decisions.md` S8-2](docs/decisions.md)).
 
 A broker **restart** keeps the ingest sessions and their shared subscriptions, so readings published before ingest reconnects queue for it. (With snapshots they didn't, and those readings were lost; [`decisions.md` S3-9](docs/decisions.md).) The plugin is new in Mosquitto 2.1 and has open bugs; the ones that touch this system are pinned by canary tests ([`decisions.md` S6-14](docs/decisions.md)).
 
@@ -90,10 +92,8 @@ The 4 lost readings in one jittered run were acknowledged by the broker but neve
 ## Open items
 
 What the lab hasn't solved, each with its numbers in [`decisions.md`](docs/decisions.md):
-- **Cold starts are slow, on the laptop.** In steady state under load every health-job part and `/fleet` answers in under 2 s. In the first minutes after a cold start on the laptop's Docker VM, health and clock-skew passes reached about 4–8 s: Postgres reading a cold table, and API event-loop stalls of up to 3.5 s from garbage collection (S7-11). Not yet re-measured on the lab VM. Moving gap work out of the API process is the next step.
 - **The open-gap window lives in memory, in each API process:** about 12 bytes per reading in the last hour (about 17 MB at 500 gateways), growing with fleet × window, and each replica warms its own (S7-11).
 - **Gap explanation reads a gateway's whole history** once that gateway has dropped readings, so its cost grows with that history; a per-gateway checkpoint rollup is the fix (S7-11).
-- **One large table.** `readings` is a single table; at fleet scale the answer is time partitioning plus rollups, not more indexes (S7-11).
 - **The laptop was the limit, not the system.** On a quiet 8 vCPU / 32 GB machine every scenario passes, both persistence back ends measure the same, and the laptop's lag FAILs don't reproduce (S7-12). The load numbers above were measured on the laptop and are kept as they are; read them as a floor.
 - **Revocation needs a broker restart** to drop a revoked gateway's open connection (S4-3).
 - **Nothing is deployed:** Terraform is plan-only and CI runs once the repo is pushed (S7-3, S7-4).

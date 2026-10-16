@@ -251,6 +251,49 @@ A gap that a later replay fills disappears by itself, so recheck after the gatew
 
 ---
 
+## Readings too old (alert ReadingsTooOld)
+
+**What it means:** ingest dead-lettered a reading as `too_old`: it was measured before what retention keeps (RETENTION_DAYS, 30 in production), so there's no partition for it (S8-2). Unlike the other dead-letter reasons, this is a real reading lost for good. It happens when a gateway was offline longer than retention and then replayed its buffer.
+
+**First three things to check:**
+1. Which gateway: `SELECT topic, detail, received_at FROM dead_letters WHERE reason = 'too_old' ORDER BY received_at DESC LIMIT 10;`. The detail says when it was measured and what retention keeps.
+2. Whether it's one gateway coming back from a long outage (expected, then it stops) or many (a clock problem on the gateways, or RETENTION_DAYS set lower than intended).
+3. RETENTION_DAYS on ingest and on the `partitions` service: they must be the same value. Ingest refuses to start if partitions don't cover its window.
+
+**The data isn't gone from the dead-letter table:** the raw payload is kept there. Recovering it means creating the old day's partition by hand (`readings_pYYYYMMDD`) and re-inserting from `dead_letters`, outside retention, which the next maintenance pass will drop again unless retention is raised.
+
+---
+
+## Reading key reused (alert ReadingKeyReused)
+
+**What it means:** a gateway sent two different readings with the same (device, epoch, seq), with different `measured_at`. A redelivery never does this: the gateway replays the bytes it stored, timestamp included. So it's a producer bug, like S2-6's epoch reuse after a storage reset. Since S8-2 the readings key includes `measured_at`, so both readings are stored; nothing is dropped, but per-device sequence logic (gaps, counts by seq) sees one seq twice.
+
+**First three things to check:**
+1. Which readings: `SELECT device_id, epoch, seq, array_agg(measured_at ORDER BY measured_at) FROM readings WHERE measured_at > now() - interval '2 hours' GROUP BY 1, 2, 3 HAVING count(*) > 1;`
+2. Whether the gateway restarted or had its storage reset just before (its status history): an epoch that didn't advance is the S2-6 case.
+3. The gateway's version and logs. The fix is on the gateway; the stored rows are both real readings and can stay.
+
+**Limit:** the detector sees reuses within the health job's one-hour window only. Reuses further apart are stored without an alert; the query in step 1, widened, finds them.
+
+---
+
+## Partitions running out (alerts PartitionsRunningOut, PartitionMaintenanceStale)
+
+**What it means:** `readings` is partitioned by day with no default partition (S8-2). The `partitions` service creates a week ahead every hour. Fewer than 2 days ahead means it isn't running; once today's partitions run out, inserts would fail (ingest retries them, so nothing is dropped, but nothing is stored either).
+
+**First three things to check:**
+1. The service: `docker compose -f deploy/compose.yaml ps partitions` and `logs partitions | tail`.
+2. What exists: `SELECT relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent = 'readings'::regclass ORDER BY relname DESC LIMIT 5;`
+3. Run a pass by hand: `docker compose -f deploy/compose.yaml run --rm migrate` (it migrates, then maintains once).
+
+---
+
+## After a bulk load or a restore
+
+Run `VACUUM ANALYZE readings;` once it finishes. Right after a bulk load, the visibility map isn't set and the statistics are stale, so index-only scans fetch from the heap, and the first queries are slow. On the lab VM, the first cold start after loading 4.4M readings had a 6.1 s clock-skew query and 1.5 s commits; later cold starts had nothing over 0.8 s (S8-1).
+
+---
+
 ## SLO burn (alerts SLOBurnFast, SLOBurnSlow)
 
 **What it means:** fewer than 99% of readings (measured while their gateway was connected) are queryable within 30 s of being measured (S6-1), and the error budget is going fast. **Fast** is 14.4× the sustainable rate over 1 h; **slow** is 6× over 6 h.

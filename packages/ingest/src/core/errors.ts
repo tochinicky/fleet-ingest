@@ -43,6 +43,14 @@ const NETWORK_ERROR_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", 
  */
 const CONNECTION_LOSS_MESSAGE = /Connection terminated|timeout exceeded when trying to connect|timeout expired|connection timeout|Client has encountered a connection error|Query read timeout/i;
 
+/**
+ * Postgres's message for a row with no partition to go to (SQLSTATE 23514, which is otherwise a constraint
+ * violation and so poison). It can't happen while partition maintenance keeps its window (S8-2); if it ever does,
+ * the batch is retried until maintenance has created the partition, never dead-lettered, so nothing is lost
+ * silently, and the retries alert (DBWriteErrors).
+ */
+const NO_PARTITION_MESSAGE = /no partition of relation "readings" found for row/;
+
 /** How deep `cause` chains are followed; the driver wraps at most once or twice. */
 const MAX_CAUSE_DEPTH = 5;
 
@@ -62,6 +70,7 @@ function networkCode(error: unknown, depth = 0): string | undefined {
  */
 export function classifyDatabaseError(error: unknown): FailureKind {
   if (networkCode(error)) return "retryable";
+  if (NO_PARTITION_MESSAGE.test(error instanceof Error ? error.message : "")) return "retryable";
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
   if (code && code.length === 5) {
     if (RETRYABLE_SQLSTATE.test(code)) return "retryable";

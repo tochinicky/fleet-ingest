@@ -7,6 +7,7 @@ import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openIngestPool } from "../src/adapters/databasePool.ts";
+import { assertPartitionsCover } from "../src/adapters/partitionCheck.ts";
 import { createPostgresStore } from "../src/adapters/postgresStore.ts";
 import type { IngestStore, ItemOutcome, StoreItem } from "../src/adapters/postgresStore.ts";
 import { classifyDatabaseError } from "../src/core/errors.ts";
@@ -177,6 +178,36 @@ describe("dead letters", () => {
     expect(await write(reading(row({ deviceId: "dev-dl" })), dead)).toEqual(["inserted", "dead:invalid_json"]);
     const { rows } = await pool.query("SELECT payload FROM dead_letters WHERE topic = 'x'");
     expect(new Uint8Array(rows[0].payload)).toEqual(payload);
+  });
+});
+
+describe("readings partitioned by day on measured_at (S8-2)", () => {
+  /** The partition a stored reading landed in. */
+  async function partitionOf(deviceId: string, seq: number): Promise<string[]> {
+    const { rows } = await pool.query<{ p: string }>("SELECT tableoid::regclass::text AS p FROM readings WHERE device_id = $1 AND seq = $2 ORDER BY p", [deviceId, seq]);
+    return rows.map((r) => r.p);
+  }
+
+  it("a reading at 23:59:59.999 and its redelivery later are stored once, in that day's partition; 00:00:00.000 goes to the next day", async () => {
+    const lastMs = row({ deviceId: "dev-boundary", seq: 1, measuredAt: new Date("2026-10-14T23:59:59.999Z") });
+    const midnight = row({ deviceId: "dev-boundary", seq: 2, measuredAt: new Date("2026-10-15T00:00:00.000Z") });
+    expect(await write(reading(lastMs))).toEqual(["inserted"]);
+    expect(await write(reading(midnight), reading(lastMs))).toEqual(["inserted", "duplicate"]);
+    expect(await partitionOf("dev-boundary", 1)).toEqual(["readings_p20261014"]);
+    expect(await partitionOf("dev-boundary", 2)).toEqual(["readings_p20261015"]);
+  });
+
+  it("ingest's startup check passes when the partitions cover what it may accept, and names the hole when they don't", async () => {
+    await expect(assertPartitionsCover(pool, 7, new Date())).resolves.toBeUndefined();
+    await expect(assertPartitionsCover(pool, 60, new Date())).rejects.toThrow(/no partition for part of/);
+  });
+
+  it("a key reused with another timestamp is now stored twice (the D4 change): the detector, not the key, catches it", async () => {
+    const first = row({ deviceId: "dev-reuse", seq: 9, measuredAt: new Date("2026-10-14T10:00:00Z") });
+    const reused = row({ deviceId: "dev-reuse", seq: 9, measuredAt: new Date("2026-10-14T10:05:00Z") });
+    expect(await write(reading(first))).toEqual(["inserted"]);
+    expect(await write(reading(reused))).toEqual(["inserted"]);
+    expect(await partitionOf("dev-reuse", 9)).toHaveLength(2);
   });
 });
 

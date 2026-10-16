@@ -22,6 +22,9 @@ scrape_configs:
   - job_name: broker
     static_configs:
       - targets: ["broker-exporter:9464"]
+  - job_name: partitions
+    static_configs:
+      - targets: ["partitions:9466"]
   - job_name: cadvisor
     # cAdvisor's page is about 1 MB and takes a few seconds on Docker Desktop.
     scrape_interval: 30s

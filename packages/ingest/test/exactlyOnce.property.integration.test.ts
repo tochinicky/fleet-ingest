@@ -9,7 +9,8 @@
  * - power losses (a new epoch with the seq rolled back);
  * - readings that share a timestamp;
  * - duplicates, and late backfills behind live data;
- * - batches of any size, including a copy of a reading in the same batch as the original.
+ * - batches of any size, including a copy of a reading in the same batch as the original;
+ * - a stream that crosses midnight UTC, so it spans two daily partitions of `readings` (S8-2).
  */
 import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import fc from "fast-check";
@@ -35,7 +36,11 @@ afterAll(async () => {
   await container?.stop();
 });
 
-const START = Date.UTC(2026, 9, 14, 12, 0, 0);
+/**
+ * 15 s before midnight UTC: every generated stream crosses into the next day's partition (S8-2), so duplicates,
+ * reorderings and backfills are exercised on both sides of a partition boundary.
+ */
+const START = Date.UTC(2026, 9, 14, 23, 59, 45);
 
 /**
  * One device's history as the gateway produced it: a list of boots, each with how many readings it sent and how far
