@@ -29,7 +29,7 @@
 import {
   brokerKeepaliveTimeouts, crashNode, ensureFleet, finish, gatedBy, ingestSummaries, lagByMeasured, lagSeconds,
   openDatabase, progress, PROMPT_LAG_P95_SECONDS, promQuery, readSys, restartCount, run, samplePsi, sleep,
-  SYS_DROPPED, waitForApiWarm, waitForLedgerStored, waitForQuietBaseline,
+  SYS_DROPPED, waitForGapsWarm, waitForLedgerStored, waitForQuietBaseline,
 } from "./lib.ts";
 import { gatedByStall } from "./stallRule.ts";
 import type { StallEvidence } from "./stallRule.ts";
@@ -43,8 +43,8 @@ async function main(): Promise<void> {
   progress(started, `starting ${GATEWAYS} gateways`);
   await ensureFleet(pool, GATEWAYS);
   await sleep(20_000);
-  const api = await waitForApiWarm();
-  progress(started, api.warm ? `the API's gap window is warm after ${api.waitedSeconds} s` : `the API's gap window still isn't warm after ${api.waitedSeconds} s; going on`);
+  const warmUp = await waitForGapsWarm();
+  progress(started, warmUp.warm ? `the health worker's gap window is warm after ${warmUp.waitedSeconds} s` : `the health worker's gap window still isn't warm after ${warmUp.waitedSeconds} s; going on`);
   progress(started, "waiting for a quiet baseline (30 s of lag p95 < 2 s)");
   const baseline = await waitForQuietBaseline(pool);
   progress(started, baseline.quiet ? `quiet after ${baseline.waitedSeconds} s (p95 ${baseline.p95.toFixed(2)} s)` : `no quiet baseline in ${baseline.waitedSeconds} s (p95 ${baseline.p95.toFixed(2)} s): recovery checks will be INVALID`);
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
       pass: freshLag.p95 < PROMPT_LAG_P95_SECONDS,
       detail: `p95 measured after +10 s ${freshLag.p95.toFixed(2)} s; down ${downSeconds.toFixed(1)} s, max lag during ${lagDuring.max.toFixed(1)} s (backlog ${backlogLag.p95.toFixed(2)} s, last 15 s received ${lagAfter.p95.toFixed(2)} s)`,
     })),
-  ], { api, baseline, stall, downSeconds, unackedAtKill, redelivered, duplicates, droppedDelta, ledger, lagDuring, lagAfter, backlogLag, freshLag, killedAt, backAt });
+  ], { warmUp, baseline, stall, downSeconds, unackedAtKill, redelivered, duplicates, droppedDelta, ledger, lagDuring, lagAfter, backlogLag, freshLag, killedAt, backAt });
 }
 
 await run(main);

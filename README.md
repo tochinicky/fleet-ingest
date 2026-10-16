@@ -16,10 +16,10 @@ Built in slices; every decision and finding is in [`docs/decisions.md`](docs/dec
 | 3 | Backpressure and retries: batches of 500 / 200 ms, full-jitter backoff, poison isolation, toxiproxy, scenarios 3a, 3b and 7 | done |
 | 4 | Identity: per-gateway certificates (mTLS), ACL by CN, CRL revocation, device binding, threat list, gateway TLS, scenario 6 | done |
 | 5 | Health: evidence-based online/offline/unknown, stale devices, gaps per epoch (explained by droppedTelemetry), commands, scenarios 2 and 8 | done |
-| 6a | Operability: metrics, broker exporter, alerts with runbooks (14 then; 20 today), SLO with burn-rate alerts, Grafana dashboard | done |
+| 6a | Operability: metrics, broker exporter, alerts with runbooks (14 then; 22 today), SLO with burn-rate alerts, Grafana dashboard | done |
 | 6b | Load numbers at 500 gateways, scenario 4, exact 3b accounting, persist-sqlite experiment | done |
 | 7 | Ship: commands as desired state (reconciler), lint and CI, Terraform (plan only), production profile, the real gateway end to end, demo.sh; persist-sqlite adopted (S7-7); database hangs and dropped connections survived (S7-9, S7-10); fleet-wide reads without whole-table scans (S7-11); clean reruns on a lab VM (S7-12) | done |
-| 8 | Close the open items: cold starts re-measured (S8-1), `readings` partitioned by day with retention (S8-2); next a health worker, a gap-explanation checkpoint, revocation without a restart, always-on deployment | in progress |
+| 8 | Close the open items: cold starts re-measured (S8-1), `readings` partitioned by day with retention (S8-2), the health job in its own worker (S8-3); next a gap-explanation checkpoint, revocation without a restart, always-on deployment | in progress |
 
 ## Run it
 
@@ -92,7 +92,7 @@ The 4 lost readings in one jittered run were acknowledged by the broker but neve
 ## Open items
 
 What the lab hasn't solved, each with its numbers in [`decisions.md`](docs/decisions.md):
-- **The open-gap window lives in memory, in each API process:** about 12 bytes per reading in the last hour (about 17 MB at 500 gateways), growing with fleet × window, and each replica warms its own (S7-11).
+- **The open-gap window lives in memory, in the health worker:** about 12 bytes per reading in the last hour (about 17 MB at 500 gateways), growing with fleet × window. One window now, not one per API replica, but a restarted worker still warms it from the database before it publishes gaps again (S7-11, S8-3).
 - **Gap explanation reads a gateway's whole history** once that gateway has dropped readings, so its cost grows with that history; a per-gateway checkpoint rollup is the fix (S7-11).
 - **The laptop was the limit, not the system.** On a quiet 8 vCPU / 32 GB machine every scenario passes, both persistence back ends measure the same, and the laptop's lag FAILs don't reproduce (S7-12). The load numbers above were measured on the laptop and are kept as they are; read them as a floor.
 - **Revocation needs a broker restart** to drop a revoked gateway's open connection (S4-3).

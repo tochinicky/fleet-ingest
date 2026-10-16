@@ -1,6 +1,6 @@
 /**
- * The background health job. It turns the database's view of the fleet into Prometheus metrics,
- * because alerts are evaluated by Prometheus, not by the API:
+ * The background health job, run by the health worker (S8-3), the single writer of its metrics. It turns the
+ * database's view of the fleet into Prometheus metrics, because alerts are evaluated by Prometheus:
  * - every 15 s: each gateway's state, each device's staleness, each gateway's clock skew, the SLO counters, the
  *   backfill counter, and how many commands are pending or stuck (S7-1);
  * - every 60 s: open gaps over the last hour, split into explained and unexplained.
@@ -8,7 +8,7 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import type pg from "pg";
-import { Counter, Gauge } from "@fleet-ingest/observability";
+import { Counter, Gauge, Histogram } from "@fleet-ingest/observability";
 import type { Registry } from "@fleet-ingest/observability";
 import { classifyGateway, isDeviceStale } from "./core/health.ts";
 import type { GatewayState } from "./core/health.ts";
@@ -23,6 +23,12 @@ export const SLO_SECONDS = 30;
 
 /** A gateway whose clock skew exceeds this is excluded from the SLO and counted separately (S6-1). */
 export const SLO_MAX_SKEW_SECONDS = 30;
+
+/**
+ * Seconds, for the pass histogram: 2 s is the line the README promises, 10 s is S7-10's query timeout. The S8-1 slow
+ * first pass (6.13 s) would have landed in the 10 s bucket instead of being overwritten before a scrape.
+ */
+const PASS_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30];
 
 /** The job's metrics. */
 interface HealthMetrics {
@@ -40,6 +46,7 @@ interface HealthMetrics {
   partLastSuccess: Gauge<"part">;
   failures: Counter<"part" | "reason">;
   passSeconds: Gauge<"part">;
+  passDuration: Histogram<"part">;
   gapsWarm: Gauge;
   gapStepSeconds: Gauge<"step">;
   gapDeltaRows: Gauge;
@@ -73,6 +80,10 @@ function createHealthMetrics(registry: Registry): HealthMetrics {
     commandsPending: new Gauge({ name: "fleet_commands_pending", help: "Gateways whose reported mode isn't their desired mode yet, by whether the gateway is online (S7-1).", labelNames: ["connected"], registers }),
     commandsStuck: new Gauge({ name: "fleet_commands_stuck", help: "Online gateways that haven't applied their desired mode within 5 min of being able to (S7-1). /fleet lists them.", registers }),
     passSeconds: new Gauge({ name: "fleet_health_job_pass_seconds", help: "How long each part of the last health-job pass took.", labelNames: ["part"], registers }),
+    passDuration: new Histogram({
+      name: "fleet_health_job_pass_duration_seconds", labelNames: ["part"], registers, buckets: PASS_BUCKETS,
+      help: "How long each part of every health-job pass took. Unlike the last-pass gauge, a slow pass can't fall between two scrapes (S8-1, S8-3).",
+    }),
     partLastSuccess: new Gauge({
       name: "fleet_health_job_part_last_success_timestamp_seconds", labelNames: ["part"], registers,
       help: "When each part of the health job last succeeded: its metrics are this old (S7-10).",
@@ -179,6 +190,9 @@ export const GAP_WINDOW_MS = 3600_000;
 export type FleetGaps =
   | { complete: true; asOf: string; gaps: number; missingReadings: number; explainedByDroppedTelemetry: number }
   | { complete: false; asOf: null };
+
+/** Where a complete gaps pass is published (the worker's snapshot row, S8-3). */
+export type PublishGaps = (gaps: FleetGaps) => Promise<void>;
 
 /** The incremental gap state: the window, its cursor, and the last result. */
 interface GapTracker {
@@ -297,7 +311,9 @@ async function timed<T>(metrics: HealthMetrics, part: string, work: () => Promis
     metrics.failures.labels(part, isDatabaseTimeout(error) ? "timeout" : "error").inc();
     throw error;
   } finally {
-    metrics.passSeconds.labels(part).set((performance.now() - started) / 1000);
+    const seconds = (performance.now() - started) / 1000;
+    metrics.passSeconds.labels(part).set(seconds);
+    metrics.passDuration.labels(part).observe(seconds);
   }
 }
 
@@ -306,9 +322,11 @@ async function timed<T>(metrics: HealthMetrics, part: string, work: () => Promis
  * any other error) stops the pass: it's counted in `fleet_health_job_failures_total`, reported through `onError`, and
  * retried at the next tick. The parts after it aren't run, so their metrics keep their last values, and
  * `fleet_health_job_part_last_success_timestamp_seconds{part}` says how old those are; HealthJobStale fires on it, and
- * HealthJobFailing on the counter. `intervalMs` is for tests. Returns the job: stop it, or read its last gaps pass.
+ * HealthJobFailing on the counter. After each gaps pass, `publish` (if given) receives the result, as its own part,
+ * `snapshot`: the worker writes it to `health_snapshot` for the API (S8-3). `intervalMs` is for tests. Returns the
+ * job: stop it, or read its last gaps pass.
  */
-export function startHealthJob(pool: pg.Pool, registry: Registry, onError: (error: unknown) => void, intervalMs = 15_000): HealthJob {
+export function startHealthJob(pool: pg.Pool, registry: Registry, onError: (error: unknown) => void, intervalMs = 15_000, publish?: PublishGaps): HealthJob {
   const metrics = createHealthMetrics(registry);
   let watermark = new Date();
   let pass = 0;
@@ -317,7 +335,7 @@ export function startHealthJob(pool: pg.Pool, registry: Registry, onError: (erro
   const tracker: GapTracker = { window: new GapWindow(), cursor: null, warm: false, last: { complete: false, asOf: null } };
   // Every part starts "fresh as of the job's start", so a part that never succeeds (a warm-up that never finishes, say)
   // still trips HealthJobStale 2 min later, instead of never having a series at all.
-  for (const part of ["health", "clock_skew", "slo", "gaps"]) metrics.partLastSuccess.labels(part).set(Date.now() / 1000);
+  for (const part of ["health", "clock_skew", "slo", "gaps", ...(publish ? ["snapshot"] : [])]) metrics.partLastSuccess.labels(part).set(Date.now() / 1000);
   metrics.gapsWarm.set(0);
   let warmUpStarted = false;
   /** One pass; skipped if the previous pass is still running, so slow queries can't pile up. */
@@ -329,7 +347,10 @@ export function startHealthJob(pool: pg.Pool, registry: Registry, onError: (erro
       await timed(metrics, "health", () => updateHealth(pool, metrics, now));
       const skews = await timed(metrics, "clock_skew", () => updateClockSkew(pool, metrics));
       watermark = await timed(metrics, "slo", () => updateSlo(pool, metrics, skews, watermark, now));
-      if (pass++ % 4 === 0 && tracker.warm) await timed(metrics, "gaps", () => updateGaps(pool, metrics, tracker, now));
+      if (pass++ % 4 === 0 && tracker.warm) {
+        await timed(metrics, "gaps", () => updateGaps(pool, metrics, tracker, now));
+        if (publish) await timed(metrics, "snapshot", () => publish(tracker.last));
+      }
       metrics.lastRun.set(now.getTime() / 1000);
     } catch (error) {
       onError(error);

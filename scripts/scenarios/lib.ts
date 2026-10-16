@@ -334,15 +334,17 @@ export function finish(scenario: string, verdicts: Verdict[], measurements: Reco
 export const PROMPT_LAG_P95_SECONDS = 2;
 
 /**
- * Waits, up to `maxMs`, until the API reports its gap window warm (`fleet_health_gaps_warm` = 1). Waiting for the
- * system to say it's ready is part of a scenario's setup, not of its judgement: right after a cold start the API's
- * warm-up competes with everything else, and a baseline measured during it measures the start-up (S7-7, S7-11).
- * Returns how long it waited, and whether the API got there.
+ * Waits, up to `maxMs`, until the health worker reports its gap window warm (`fleet_health_gaps_warm` = 1). Waiting
+ * for the system to say it's ready is part of a scenario's setup, not of its judgement: right after a cold start the
+ * warm-up competes with everything else, and a baseline measured during it measures the start-up (S7-7, S7-11). The
+ * warm-up runs in the worker since S8-3. Returns how long it waited, and whether the worker got there.
  */
-export async function waitForApiWarm(maxMs = 300_000): Promise<{ warm: boolean; waitedSeconds: number }> {
+export async function waitForGapsWarm(maxMs = 300_000): Promise<{ warm: boolean; waitedSeconds: number }> {
   const started = Date.now();
   for (;;) {
-    const warm = (await promQuery("max(fleet_health_gaps_warm)").catch(() => NaN)) === 1;
+    // Only samples scraped in the last 25 s: Prometheus keeps its data across `compose down`, and after its restart a
+    // previous run's worker still reads warm for the 5-min lookback (scenario 10 waited 0 s on such a sample, S8-3).
+    const warm = (await promQuery("max(fleet_health_gaps_warm and (time() - timestamp(fleet_health_gaps_warm)) < 25)").catch(() => NaN)) === 1;
     const waitedSeconds = Math.round((Date.now() - started) / 1000);
     if (warm || Date.now() - started >= maxMs) return { warm, waitedSeconds };
     await sleep(5000);

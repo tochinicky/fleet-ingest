@@ -28,6 +28,7 @@ scenarios=(
   "7b|ingest-1 down past a reduced bound|scripts/scenarios/replica-down-overflow.ts"
   "8|power loss on a gateway|scripts/scenarios/power-loss.ts"
   "9|the real gateway, 2 min WAN cut|scripts/scenarios/real-gateway.ts"
+  "10|kill -9 the leading health worker|scripts/scenarios/worker-takeover.ts"
 )
 
 scripts/dev-certs.sh 500 >/dev/null

@@ -137,6 +137,17 @@ services:
       mosquitto: { condition: service_started }
     restart: always
 
+  # The health job (S8-3): the single writer of the fleet health metrics and of health_snapshot, which /fleet reads.
+  # One replica; a second would wait on standby behind the advisory lock, and takes over if this one goes.
+  health-worker:
+    <<: *node
+    command: ["node", "packages/api/src/workerMain.ts"]
+    environment:
+      DATABASE_URL: postgres://fleet:fleet-dev-only@postgres:5432/fleet
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: always
+
   fleet-sim:
     <<: *node
     command: ["node", "packages/fleet-sim/src/main.ts"]

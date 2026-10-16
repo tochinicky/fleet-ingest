@@ -100,8 +100,61 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, part: gaps }
             exp_annotations:
-              summary: "The API's health job hasn't completed its gaps part for 2 min: fleet alerts are working on stale data"
+              summary: "The health worker's job hasn't completed its gaps part for 2 min: fleet alerts are working on stale data"
               runbook: docs/runbooks.md#health-job-stale-alert-healthjobstale
+
+  - name: HealthWorkerNotRunning fires when no worker is leader for 2 min, including when the worker's series are gone
+    interval: 30s
+    input_series:
+      # Leader until 3m, on standby from 3m to 6m, then gone altogether (the target disappeared).
+      - series: 'fleet_health_worker_leader{instance="health-worker:9464"}'
+        values: '1x6 0x6 _x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HealthWorkerNotRunning
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: HealthWorkerNotRunning
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HealthWorkerNotRunning
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "No health worker is running the health job: fleet health metrics and alerts are blind"
+              runbook: docs/runbooks.md#health-worker-not-running-alert-healthworkernotrunning
+      - eval_time: 9m
+        alertname: HealthWorkerNotRunning
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: "No health worker is running the health job: fleet health metrics and alerts are blind"
+              runbook: docs/runbooks.md#health-worker-not-running-alert-healthworkernotrunning
+
+  - name: HealthJobPassSlow fires on three slow passes of one part in 15 min, not on one
+    interval: 15s
+    input_series:
+      # health: 1 pass every 15 s, all fast, except one slow pass at 1m and two more at 5m15s and 5m30s.
+      - series: 'fleet_health_job_pass_duration_seconds_count{part="health", instance="health-worker:9464"}'
+        values: '0+1x81'
+      - series: 'fleet_health_job_pass_duration_seconds_bucket{part="health", le="2", instance="health-worker:9464"}'
+        values: '0+1x3 3 4+1x15 19 19 20+1x58'
+      # clock_skew: every pass fast.
+      - series: 'fleet_health_job_pass_duration_seconds_count{part="clock_skew", instance="health-worker:9464"}'
+        values: '0+1x80'
+      - series: 'fleet_health_job_pass_duration_seconds_bucket{part="clock_skew", le="2", instance="health-worker:9464"}'
+        values: '0+1x80'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HealthJobPassSlow
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HealthJobPassSlow
+        exp_alerts:
+          - exp_labels: { severity: warning, part: health }
+            exp_annotations:
+              summary: "The health worker's health part took over 2 s at least 3 times in 15 min"
+              runbook: docs/runbooks.md#health-job-pass-slow-alert-healthjobpassslow
 
   - name: HealthJobFailing fires on two failures of a part in 5 min, not on one
     interval: 30s
@@ -119,7 +172,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, part: gaps, reason: timeout }
             exp_annotations:
-              summary: "The API's health job keeps failing its gaps part (timeout)"
+              summary: "The health worker's job keeps failing its gaps part (timeout)"
               runbook: docs/runbooks.md#health-job-failing-alert-healthjobfailing
       - eval_time: 11m
         alertname: HealthJobFailing

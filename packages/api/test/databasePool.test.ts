@@ -50,6 +50,8 @@ describe("health job on a database that times out", () => {
     expect(text).toMatch(/fleet_health_job_failures_total\{part="health",reason="timeout",service="api-test"\} 1/);
     expect(healthStamp, "the part's stamp is still the job's start: it never succeeded").toBeLessThanOrEqual(startedAt + 0.01);
     expect(text).toMatch(/fleet_health_job_last_run_timestamp_seconds\{service="api-test"\} 0/);
+    expect(text, "every pass is in the histogram, failed ones too: a slow pass can't fall between scrapes (S8-3)")
+      .toMatch(/fleet_health_job_pass_duration_seconds_count\{[^}]*part="health"[^}]*\} 1/);
     expect(text).toMatch(/fleet_health_gaps_warm\{service="api-test"\} 0/);
     expect(job.fleetGaps()).toEqual({ complete: false, asOf: null });
   });

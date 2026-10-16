@@ -86,6 +86,18 @@ beforeAll(async () => {
     .withWaitStrategy(Wait.forLogMessage(/running/))
     .start();
   url = `mqtts://localhost:${broker.getMappedPort(8883)}`;
+  // "running" can be logged a moment before the mapped port completes a TLS handshake: the first test's first client
+  // was once dropped mid-handshake on the lab VM (S8-3). Ready means one handshake succeeded, within 10 s.
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const probe = await tryConnect("readiness-probe", tlsFor("ops"));
+    if (typeof probe !== "string") {
+      await probe.endAsync();
+      break;
+    }
+    if (Date.now() > deadline) throw new Error(`broker never accepted a TLS client: ${probe}`);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 });
 
 afterAll(async () => {

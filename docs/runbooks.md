@@ -307,27 +307,49 @@ Run `VACUUM ANALYZE readings;` once it finishes. Right after a bulk load, the vi
 
 ## Health job stale (alert HealthJobStale)
 
-**What it means:** one part of the API's background health job (`health`, `clock_skew`, `slo` or `gaps`, in the alert's `part` label) hasn't succeeded for 2 minutes, so its metrics are frozen. A failing part also stops the parts after it in the same pass. For `health`, that's GatewayOffline, DeviceStale and the command gauges; for `slo`, the SLO counters; for `gaps`, the gap totals.
+**What it means:** one part of the health worker's job (`health`, `clock_skew`, `slo`, `gaps` or `snapshot`, in the alert's `part` label) hasn't succeeded for 2 minutes, so its metrics are frozen. A failing part also stops the parts after it in the same pass. For `health`, that's GatewayOffline, DeviceStale and the command gauges; for `slo`, the SLO counters; for `gaps`, the gap totals; for `snapshot`, what `/fleet` reports (its `openGapsLastHour.ageSeconds` grows).
 
 **First three things to check:**
-1. Is the API up? `curl -s localhost:8080/health/ready`.
-2. Its log: `docker compose -f deploy/compose.yaml logs api | grep "health job" | tail`.
-3. Which part is slow: `fleet_health_job_pass_seconds{part}`. Each part takes well under 2 s (S7-11, measured at 4.3M readings); for gaps, `fleet_health_gaps_step_seconds{step}` splits it into read, window and explain. After an API start, gaps waits for its warm-up (`fleet_health_gaps_warm` = 1 after about a minute for 500 gateways).
+1. Is the worker leader? `fleet_health_worker_leader` should be 1 on exactly one target. If none is, it's HealthWorkerNotRunning instead.
+2. Its log: `docker compose -f deploy/compose.yaml logs health-worker | grep "health job" | tail`.
+3. Which part is slow: `fleet_health_job_pass_duration_seconds{part}` (every pass) or `fleet_health_job_pass_seconds{part}` (the last one). Each part takes well under 2 s (S7-11, measured at 4.3M readings); for gaps, `fleet_health_gaps_step_seconds{step}` splits it into read, window and explain. After a worker start, gaps waits for its warm-up (`fleet_health_gaps_warm` = 1 after about a minute for 500 gateways).
 
 ---
 
 ## Health job failing (alert HealthJobFailing)
 
 **What it means:** one part of the health job failed at least twice in 5 minutes. The `reason` label says how:
-- `timeout`: the database didn't answer within the API's 10 s statement timeout, or its 15 s query timeout (S7-10). The pass stopped there instead of holding a pool slot, and that part's metrics are as old as `fleet_health_job_part_last_success_timestamp_seconds{part}` says.
+- `timeout`: the database didn't answer within the worker's 10 s statement timeout, or its 15 s query timeout (S7-10). The pass stopped there instead of holding a pool slot, and that part's metrics are as old as `fleet_health_job_part_last_success_timestamp_seconds{part}` says.
 - `error`: anything else, usually a lost connection or a schema problem.
 
 **First three things to check:**
-1. The API's log: `docker compose -f deploy/compose.yaml logs api | grep "health job pass failed" | tail`. The error is next to each line.
+1. The worker's log: `docker compose -f deploy/compose.yaml logs health-worker | grep "health job pass failed" | tail`. The error is next to each line.
 2. For `timeout`, what Postgres is doing: `SELECT pid, now() - query_start AS running, wait_event_type, left(query, 80) FROM pg_stat_activity WHERE state <> 'idle' ORDER BY running DESC;`. A lock wait points to a long transaction elsewhere, and a long `gaps` scan to a large readings table (gaps scan all of a device's history).
-3. Whether ingest is affected too: DBWriteErrors and BatchRetryingTooLong. If both are firing, it's the database, not the API.
+3. Whether ingest is affected too: DBWriteErrors and BatchRetryingTooLong. If both are firing, it's the database, not the worker.
 
-**Right after an API deploy:** HealthJobFailing can fire from the old process's failures plus a cold-cache timeout on the new one (seen at the S7-11 deploy). It resolves within 5 minutes if the new process's parts succeed; check `fleet_health_job_part_last_success_timestamp_seconds`.
+**Right after a worker deploy:** HealthJobFailing can fire from the old process's failures plus a cold-cache timeout on the new one (seen at the S7-11 deploy, when the job was still in the API). It resolves within 5 minutes if the new process's parts succeed; check `fleet_health_job_part_last_success_timestamp_seconds`.
+
+---
+
+## Health worker not running (alert HealthWorkerNotRunning)
+
+**What it means:** no process holds the health worker's lock and runs the health job (S8-3). The worker is down, its scrape target is gone, or every replica is on standby. Every fleet alert (GatewayOffline, DeviceStale, SLO burn, CommandNotApplied) is now evaluating frozen or missing data, and `/fleet`'s open gaps stop advancing (`ageSeconds` grows).
+
+**First three things to check:**
+1. Is it running? `docker compose -f deploy/compose.yaml ps health-worker`. It restarts itself (`restart: always`); a crash loop shows as a recent start time.
+2. Its log: `docker compose -f deploy/compose.yaml logs health-worker | tail -20`. "lost the health worker lock" means its lock connection to Postgres dropped and it exited on purpose, to come back on standby. "on standby" with no leader anywhere means something else holds the lock.
+3. Who holds the lock: `SELECT l.pid, a.client_addr, a.backend_start, a.state FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory' AND l.objid = 1751474540;`. A session that isn't a live worker (a half-dead connection, a manual `psql`) can be ended with `SELECT pg_terminate_backend(<pid>);`, and a standby takes over within 5 s.
+
+---
+
+## Health job pass slow (alert HealthJobPassSlow)
+
+**What it means:** one part of the health job took over 2 s at least three times in 15 minutes, from the pass histogram, so it counts passes that the last-pass gauge would have overwritten between scrapes (S8-1). Fleet metrics lag by that much; past 10 s, a part times out and HealthJobFailing follows.
+
+**First three things to check:**
+1. Which part: `histogram_quantile(0.99, sum by (part, le) (rate(fleet_health_job_pass_duration_seconds_bucket[15m])))`.
+2. Postgres's slow statements and what's running (the query in "Health job failing", step 2).
+3. Whether it follows a bulk load or a restore: see "After a bulk load or a restore". S8-1's one slow first pass (6.13 s) came straight after a 4.4M-row seed.
 
 ---
 

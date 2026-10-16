@@ -73,7 +73,7 @@ The key change is a **durable log** (Kafka, Redpanda, JetStream, Kinesis, Event 
   - fatal → exit, and `restart: always` brings the replica back with the same client ID
 - `main.ts` is the only place that wires the pieces together.
 - **Observability (slice 6a):**
-  - Ingest, the API's health job and a broker exporter (`$SYS` plus log-watch) each serve `/metrics`.
+  - Ingest, the health worker (S8-3) and a broker exporter (`$SYS` plus log-watch) each serve `/metrics`.
   - Prometheus evaluates 14 alerts and the SLO from them. Alerts go to Alertmanager, then to a logging webhook.
   - The dashboard's middle row is the backpressure chain: unacked and waiting in ingest, then the broker queue, then broker drops.
 - **Health (slice 5):** a pure rule set decides online, offline or unknown per gateway, and stale per device, from receive times on ingest's clock. A reading after the latest `offline` proves life. Gaps are found per (device, epoch) with a window function, and are explained by the gateway's `droppedTelemetry`. The API publishes commands retained, with its own certificate; since slice 7 the retained command is a copy of desired state in Postgres (D below).

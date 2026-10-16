@@ -76,7 +76,7 @@ groups:
         for: 1m
         labels: { severity: warning }
         annotations:
-          summary: "The API's health job hasn't completed its {{ $labels.part }} part for 2 min: fleet alerts are working on stale data"
+          summary: "The health worker's job hasn't completed its {{ $labels.part }} part for 2 min: fleet alerts are working on stale data"
           runbook: docs/runbooks.md#health-job-stale-alert-healthjobstale
       - alert: HealthJobFailing
         # Two failures of one part in 5 min (of about 20 passes, 5 for gaps): earlier than HealthJobStale, and it also
@@ -84,8 +84,30 @@ groups:
         expr: sum by (part, reason) (increase(fleet_health_job_failures_total[5m])) >= 2
         labels: { severity: warning }
         annotations:
-          summary: "The API's health job keeps failing its {{ $labels.part }} part ({{ $labels.reason }})"
+          summary: "The health worker's job keeps failing its {{ $labels.part }} part ({{ $labels.reason }})"
           runbook: docs/runbooks.md#health-job-failing-alert-healthjobfailing
+
+      - alert: HealthWorkerNotRunning
+        # No worker holds the single-writer lock (S8-3): the worker is down, its target is gone, or every replica is on
+        # standby. HealthJobStale can't see this case: when the worker's series disappear, its alert has nothing to
+        # evaluate. Every fleet alert above is then blind, so this one is critical.
+        expr: absent(fleet_health_worker_leader == 1)
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "No health worker is running the health job: fleet health metrics and alerts are blind"
+          runbook: docs/runbooks.md#health-worker-not-running-alert-healthworkernotrunning
+
+      - alert: HealthJobPassSlow
+        # From the histogram, not the last-pass gauge: a slow pass can't fall between scrapes (S8-1, S8-3). Three passes
+        # of one part over 2 s in 15 min, so a single slow first pass after a bulk load is visible but doesn't page.
+        expr: |
+          sum by (part) (increase(fleet_health_job_pass_duration_seconds_count[15m]))
+            - sum by (part) (increase(fleet_health_job_pass_duration_seconds_bucket{le="2"}[15m])) >= 3
+        labels: { severity: warning }
+        annotations:
+          summary: "The health worker's {{ $labels.part }} part took over 2 s at least 3 times in 15 min"
+          runbook: docs/runbooks.md#health-job-pass-slow-alert-healthjobpassslow
 
   - name: ingest
     rules:

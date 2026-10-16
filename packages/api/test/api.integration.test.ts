@@ -12,16 +12,20 @@ import { createRegistry } from "@fleet-ingest/observability";
 import { buildApp } from "../src/app.ts";
 import { gapsOf } from "../src/core/gapWindow.ts";
 import { startHealthJob } from "../src/healthJob.ts";
+import { readHealthSnapshot, writeHealthSnapshot } from "../src/healthSnapshot.ts";
+import { tryWorkerLock } from "../src/workerLock.ts";
 import { gaps } from "../src/queries.ts";
 import type { CommandPublisher } from "../src/commandPublisher.ts";
 import { startCommandReconciler } from "../src/commandReconciler.ts";
 import type { CommandReconciler } from "../src/commandReconciler.ts";
 
 const TOKEN = "test-token-0123456789";
-/** What the health job's last gaps pass would have reported; /fleet passes it through (S7-11). */
+/** What the health worker's last gaps pass would have written to health_snapshot; /fleet passes it through (S7-11, S8-3). */
 const FLEET_GAPS = { complete: true as const, asOf: "2026-10-14T11:59:30.000Z", gaps: 2, missingReadings: 5, explainedByDroppedTelemetry: 3 };
 const auth = { authorization: `Bearer ${TOKEN}` };
 let container: StartedPostgreSqlContainer;
+/** A session holding the health worker lock, as the worker's lock connection does: snapshot writes are fenced on it (S8-3). */
+let leader: pg.Client;
 let pool: pg.Pool;
 let app: ReturnType<typeof buildApp>;
 const published: Array<{ gatewayId: string; mode: string }> = [];
@@ -91,13 +95,18 @@ beforeAll(async () => {
   await ensurePartitions(client, new Date("2026-10-01T00:00:00Z"), new Date(Date.now() + 14 * 86_400_000));
   client.release();
   await seed();
+  leader = new pg.Client({ connectionString: container.getConnectionUri() });
+  await leader.connect();
+  expect(await tryWorkerLock(leader)).toBe(true);
+  await writeHealthSnapshot(leader, FLEET_GAPS, "test-worker");
   reconciler = startCommandReconciler({ pool, commands, onError: () => {}, intervalMs: 3600_000 });
-  app = buildApp({ pool, commands, reconciler, apiToken: TOKEN, now: () => new Date("2026-10-14T12:00:00Z"), logger: false, fleetGaps: () => FLEET_GAPS });
+  app = buildApp({ pool, commands, reconciler, apiToken: TOKEN, now: () => new Date("2026-10-14T12:00:00Z"), logger: false, fleetGaps: (now) => readHealthSnapshot(pool, now) });
 });
 
 afterAll(async () => {
   await app?.close();
   reconciler?.stop();
+  await leader?.end();
   await pool?.end();
   await container?.stop();
 });
@@ -120,7 +129,7 @@ describe("health endpoints", () => {
 describe("a database that doesn't answer in time (S7-10)", () => {
   it("answers 503, not 500, when a query is cancelled by the statement timeout", async () => {
     const slow = new pg.Pool({ connectionString: container.getConnectionUri(), statement_timeout: 300 });
-    const slowApp = buildApp({ pool: slow, commands, reconciler, apiToken: TOKEN, now: () => new Date("2026-10-14T12:00:00Z"), logger: false, fleetGaps: () => FLEET_GAPS });
+    const slowApp = buildApp({ pool: slow, commands, reconciler, apiToken: TOKEN, now: () => new Date("2026-10-14T12:00:00Z"), logger: false, fleetGaps: (now) => readHealthSnapshot(slow, now) });
     const holder = new pg.Client({ connectionString: container.getConnectionUri() });
     await holder.connect();
     await holder.query("BEGIN");
@@ -156,8 +165,19 @@ describe("fleet and gateway health", () => {
 });
 
 describe("open gaps over the last hour, incrementally (S7-11)", () => {
-  it("/fleet reports the health job's last gaps pass as it is", async () => {
-    expect((await app.inject({ url: "/fleet", headers: auth })).json().openGapsLastHour).toEqual(FLEET_GAPS);
+  it("/fleet reports the health worker's snapshot as it is, with its age (S8-3)", async () => {
+    expect((await app.inject({ url: "/fleet", headers: auth })).json().openGapsLastHour).toEqual({ ...FLEET_GAPS, ageSeconds: 30 });
+  });
+
+  it("/fleet says not complete before the worker's first gaps pass, and never writes an incomplete pass over a snapshot", async () => {
+    await pool.query("DELETE FROM health_snapshot");
+    try {
+      expect((await app.inject({ url: "/fleet", headers: auth })).json().openGapsLastHour).toEqual({ complete: false, asOf: null, ageSeconds: null });
+      expect(await writeHealthSnapshot(leader, { complete: false, asOf: null }, "test-worker")).toBe("incomplete");
+      expect((await pool.query("SELECT count(*)::int AS n FROM health_snapshot")).rows[0]?.n).toBe(0);
+    } finally {
+      await writeHealthSnapshot(leader, FLEET_GAPS, "test-worker");
+    }
   });
 
   it("the SQL gap query and the oracle the incremental window is tested against agree on the seeded readings", async () => {
@@ -172,13 +192,13 @@ describe("open gaps over the last hour, incrementally (S7-11)", () => {
     expect((await gaps(pool, from, to)).map(key).sort()).toEqual(oracle.map(key).sort());
   });
 
-  it("the health job warms up, finds a gap measured in the last hour, and sees it close when a replay is stored later", async () => {
+  it("the health job warms up, finds a gap measured in the last hour, sees it close when a replay is stored later, and publishes each pass to the snapshot", async () => {
     const live = (seq: number, agoSeconds: number) =>
       pool.query(`INSERT INTO readings (device_id, epoch, seq, measured_at, received_at, kind) VALUES ('dev-live', 1, $1, now() - $2 * interval '1 second', now(), 'Battery')`, [seq, agoSeconds]);
     await pool.query("INSERT INTO gateways (gateway_id, first_seen) VALUES ('gw-live', now()) ON CONFLICT DO NOTHING");
     await pool.query("INSERT INTO devices (device_id, gateway_id, kind, first_seen) VALUES ('dev-live', 'gw-live', 'Battery', now()) ON CONFLICT DO NOTHING");
     for (const seq of [1, 2, 3, 6, 7]) await live(seq, 600 - seq * 5);
-    const job = startHealthJob(pool, createRegistry("api-gaps-test"), () => undefined, 100);
+    const job = startHealthJob(pool, createRegistry("api-gaps-test"), () => undefined, 100, async (g) => void (await writeHealthSnapshot(leader, g, "test-worker")));
     const until = async (predicate: () => boolean) => {
       const deadline = Date.now() + 20_000;
       while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -190,8 +210,13 @@ describe("open gaps over the last hour, incrementally (S7-11)", () => {
       await live(5, 575);
       await until(() => { const g = job.fleetGaps(); return g.complete && g.gaps === 0; });
       expect(job.fleetGaps()).toMatchObject({ complete: true, gaps: 0, missingReadings: 0 });
+      job.stop();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const { ageSeconds: _age, ...published } = await readHealthSnapshot(pool, new Date());
+      expect(published).toEqual(job.fleetGaps());
     } finally {
       job.stop();
+      await writeHealthSnapshot(leader, FLEET_GAPS, "test-worker");
     }
   });
 });

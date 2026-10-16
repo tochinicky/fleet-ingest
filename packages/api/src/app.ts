@@ -11,7 +11,7 @@ import type { CommandPublisher } from "./commandPublisher.ts";
 import type { CommandReconciler } from "./commandReconciler.ts";
 import { encodeCursor, parseReadingQuery } from "./core/readingQuery.ts";
 import { isDatabaseTimeout } from "./databasePool.ts";
-import type { FleetGaps } from "./healthJob.ts";
+import type { FleetGapsReport } from "./healthSnapshot.ts";
 import { deviceGapsReport, fleetReport, gatewayReport } from "./healthReport.ts";
 import { databaseReachable, deviceState, readingsPage, setDesiredMode } from "./queries.ts";
 
@@ -22,8 +22,8 @@ export interface AppDependencies {
   commands: CommandPublisher;
   /** Publishes desired modes, in order with its own reconcile passes (S7-1). */
   reconciler: Pick<CommandReconciler, "publish">;
-  /** The fleet's open gaps as of the health job's last gaps pass (S7-11). */
-  fleetGaps: () => FleetGaps;
+  /** The fleet's open gaps as of the health worker's last gaps pass, with their age (S7-11, S8-3). */
+  fleetGaps: (now: Date) => Promise<FleetGapsReport>;
   apiToken: string;
   /** The clock, injected so tests can pin "now" for default time windows and health ages. */
   now: () => Date;
@@ -63,7 +63,10 @@ export function buildApp(deps: AppDependencies): FastifyInstance {
       if (!hasValidToken(request, deps.apiToken)) return reply.code(401).send({ error: "missing or invalid bearer token" });
     });
 
-    secured.get("/fleet", async () => fleetReport(deps.pool, deps.now(), deps.fleetGaps()));
+    secured.get("/fleet", async () => {
+      const now = deps.now();
+      return fleetReport(deps.pool, now, await deps.fleetGaps(now));
+    });
 
     secured.get<{ Params: { id: string } }>("/gateways/:id", async (request, reply) => {
       const found = await gatewayReport(deps.pool, request.params.id, deps.now());

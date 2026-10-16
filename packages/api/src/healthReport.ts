@@ -8,7 +8,7 @@ import { classifyGateway, commandStatus, explainGaps, isDeviceStale } from "./co
 import type { CommandStatus, GatewayHealth, GatewayState } from "./core/health.ts";
 import { allGateways, devices, gaps, ingestFigures, oneGateway } from "./queries.ts";
 import type { GatewayRow } from "./queries.ts";
-import type { FleetGaps } from "./healthJob.ts";
+import type { FleetGapsReport } from "./healthSnapshot.ts";
 
 /** Health of one gateway from its row. */
 function healthOf(row: GatewayRow, now: Date): GatewayHealth {
@@ -27,13 +27,13 @@ export function commandOf(row: GatewayRow, state: GatewayState, now: Date): Comm
  * The fleet at a glance:
  * - gateways online, offline and unknown (unknown is its own count, never folded into the others);
  * - devices, and how many are stale;
- * - open gaps over the last hour, and how many the gateways' dropped counters explain: the health job's last gaps
- *   pass, so at most one pass (about 60 s) old, with its `asOf`; `complete: false` until the job's gap window has
- *   been filled at start (S7-11);
+ * - open gaps over the last hour, and how many the gateways' dropped counters explain: the health worker's last gaps
+ *   pass, read from `health_snapshot`, so about 60 s old while the worker runs, with its `asOf` and `ageSeconds`;
+ *   `complete: false` until the worker has finished its first gaps pass (S7-11, S8-3);
  * - dead letters in the last hour, and p95 ingest lag;
  * - commands still pending, and which gateways are stuck on one (the drill-down for CommandNotApplied, S7-1).
  */
-export async function fleetReport(pool: pg.Pool, now: Date, fleetGaps: FleetGaps): Promise<Record<string, unknown>> {
+export async function fleetReport(pool: pg.Pool, now: Date, fleetGaps: FleetGapsReport): Promise<Record<string, unknown>> {
   const gatewayRows = await allGateways(pool);
   const states = new Map(gatewayRows.map((row) => [row.gatewayId, healthOf(row, now).state]));
   const deviceRows = await devices(pool);

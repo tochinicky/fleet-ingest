@@ -19,6 +19,14 @@ scrape_configs:
   - job_name: api
     static_configs:
       - targets: ["api:9464"]
+  - job_name: health-worker
+    # Every replica, by DNS: a static name resolves to one of them, so with a standby running Prometheus could scrape
+    # only the standby and see no leader at all (found by scenario 10, S8-3).
+    dns_sd_configs:
+      - names: ["health-worker"]
+        type: A
+        port: 9464
+        refresh_interval: 15s
   - job_name: broker
     static_configs:
       - targets: ["broker-exporter:9464"]
