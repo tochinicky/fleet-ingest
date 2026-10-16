@@ -395,6 +395,33 @@ const BREAKS: Break[] = [
     project: "integration",
     test: "packages/api/test/gapCheckpoint.integration.test.ts",
   },
+  {
+    name: "kick-before-crl-confirmed",
+    rule: "A revoked gateway is kicked only after the broker is seen to refuse its certificate (S8-5)",
+    injects: "the kick runs right after SIGHUP, before the CRL reload is confirmed, so the gateway can reconnect",
+    file: "scripts/gatewayAdmin.ts",
+    edits: [{ find: "  await steps.reloadCrl();\n", replace: "  await steps.reloadCrl();\n  await steps.disableClient(cn);\n" }],
+    project: "unit",
+    test: "scripts/gatewayAdmin.test.ts",
+  },
+  {
+    name: "dynsec-defaults-allow",
+    rule: "With dynsec loaded, the ACL file stays authoritative: dynsec's defaults deny (S8-5)",
+    injects: "dynsec allows by default, and since either plugin can grant, a gateway may publish on another's topic",
+    file: "deploy/mosquitto/dynamic-security.seed.json",
+    edits: [{ find: "    \"publishClientSend\": false,\n", replace: "    \"publishClientSend\": true,\n" }],
+    project: "integration",
+    test: "packages/ingest/test/brokerSecurity.integration.test.ts",
+  },
+  {
+    name: "ca-key-mounted",
+    rule: "No container mounts the CA key: services mount only their own certificate files (S8-5)",
+    injects: "the API mounts the whole certificate directory, CA key included, as it did before S8-5",
+    file: "deploy/compose.yaml",
+    edits: [{ find: "    volumes: [\"./certs/ca.crt:/certs/ca.crt:ro\", \"./certs/api.crt:/certs/api.crt:ro\", \"./certs/api.key:/certs/api.key:ro\"]", replace: "    volumes: [\"./certs:/certs:ro\"]" }],
+    project: "unit",
+    test: "scripts/certMounts.test.ts",
+  },
 ];
 
 /** Applies one break, runs its test, restores the file, and reports whether the test caught it (i.e. failed). */

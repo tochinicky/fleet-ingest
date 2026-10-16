@@ -85,33 +85,55 @@ What an on-call engineer does for each alert or known failure mode. It's a lab, 
 
 ## Revoke a gateway (stolen or retired certificate)
 
-**What it means:** a gateway's private key may be in someone else's hands, or the gateway is decommissioned, and it must stop being able to publish.
+**What it means:** a gateway's private key may be in someone else's hands, or the gateway is decommissioned, and it must stop being able to publish, including on the connection it has open now.
 
-**Steps:**
-1. Revoke and regenerate the CRL: `scripts/pki.sh revoke deploy/certs <gateway-id>`
-2. Reload it: `docker compose -f deploy/compose.yaml kill -s HUP mosquitto`. **New** connections with that certificate now fail the TLS handshake.
-3. **Drop the gateway's open connection.** Mosquitto checks the CRL only at the handshake, so an open connection keeps working (decisions.md S4-3). Mosquitto 2.1.2 has no per-client disconnect without changing the auth backend, so restart the broker. Note the time first:
-   ```sh
-   date -u +%FT%TZ          # T_restart
-   docker compose -f deploy/compose.yaml restart mosquitto
-   ```
-   **What this costs:**
-   - **Every gateway reconnects.** Every queued message survives: persist-sqlite commits continuously (S6-15).
-   - **Nothing published during the restart is lost:** the ingest sessions keep their shared subscriptions, so readings queue for them until they reconnect (S6-15; with snapshots this was the S3-9 window).
-4. Verify the gateway is locked out, and stayed out:
-   - A new connection is refused with "certificate revoked":
-     ```sh
-     mosquitto_sub -h 127.0.0.1 -p 8883 --cafile deploy/certs/ca.crt --cert deploy/certs/<id>.crt --key deploy/certs/<id>.key -t x -C 1 -W 5
-     ```
-   - The broker log shows its failed handshakes, not a connection: `docker compose -f deploy/compose.yaml logs mosquitto --since 5m | grep -i '<id>'`
-   - Nothing from it is stored after the restart:
-     ```sql
-     SELECT count(*) FROM readings r JOIN devices d USING (device_id) WHERE d.gateway_id = '<id>' AND r.received_at > '<T_restart>';
-     ```
-     It should be 0.
-   - `$SYS/broker/clients/connected` (with the `ops` certificate) returns to the fleet's usual count minus one.
+**Steps:** one command, on the operator's machine (it holds the CA key in `deploy/certs` and the dynsec admin key in `deploy/admin/certs`):
+```sh
+node scripts/gateway-admin.ts revoke <gateway-id>
+```
+It does, in this order, and stops with an error at the first step that doesn't work (S8-5):
+1. revokes the certificate and regenerates the CRL (`scripts/pki.sh revoke`);
+2. sends the broker SIGHUP, which reloads the CRL for new handshakes;
+3. **waits until a handshake with the gateway's own certificate is refused as revoked** (up to 10 s). That's the proof the reload happened. If it doesn't see it, it stops **without kicking**. A kick first would close the connection, and the gateway would reconnect at once on a certificate the broker still accepts: the broker never consults dynsec's "disabled" at connect when identity comes from the certificate;
+4. kicks the open connection through the dynamic security plugin (`disableClient`), about a second in all. The broker logs `disconnected: administrative action` for it.
+
+No restart: every other gateway stays connected.
+
+**If it stops at step 3:** the broker didn't load the CRL. Check that `deploy/certs/crl.pem` changed (`openssl crl -in deploy/certs/crl.pem -noout -text | grep -A1 Serial`), and that the broker logged the reload. Then run step 2 by hand (`docker compose -f deploy/compose.yaml kill -s HUP mosquitto`) and run the script again: revoking twice is harmless. Only if the CRL can't be loaded at all, fall back to a broker restart, which drops every connection; persist-sqlite keeps the queues (S6-15).
+
+**Verify it stayed out:**
+- `mosquitto_sub -h 127.0.0.1 -p 8883 --cafile deploy/certs/ca.crt --cert deploy/certs/<id>.crt --key deploy/certs/<id>.key -t x -C 1 -W 5` is refused with "certificate revoked".
+- Nothing from it is stored after the kick: `SELECT count(*) FROM readings r JOIN devices d USING (device_id) WHERE d.gateway_id = '<id>' AND r.received_at > '<the time the script printed>';` returns 0.
 
 **Fleet-wide or single home?** Single home. If many gateways fail the handshake at once, check the CA and CRL files instead: an expired CRL (`default_crl_days 30`) or a regenerated CA locks everyone out.
+
+**Blast radius of the admin key:** `dynsec-admin` can kick any client and change dynsec's roles. Since either plugin can grant access (S8-5), a role it adds could open topics the ACL file denies. So its key never goes into a service container: `deploy/admin/certs` is mounted into none and never deployed. It's less powerful than the CA key, which can mint any identity, and is kept the same way: services mount only their own certificate files, never `ca.key` (S8-5).
+
+---
+
+## Enrol a gateway
+
+`node scripts/gateway-admin.ts enrol <gateway-id>` issues its certificate (`deploy/certs/<id>.crt` and `.key`, to install on the gateway) and registers it with the dynamic security plugin with no roles, in one step, so every gateway can be kicked later (S8-5). Re-running it is harmless. A gateway enrolled before S8-5 is registered when it's first revoked.
+
+---
+
+## Dynamic security state: back up and restore
+
+**What it is:** `/mosquitto/data/dynamic-security.json` in the broker's data volume: dynsec's defaults (all deny), the admin client, and every enrolled gateway with its disabled flag. The broker rewrites it on each change. It's seeded from `deploy/mosquitto/dynamic-security.seed.json` on a first start only.
+
+**Back up** (with the data volume, or on its own after enrolments and revocations):
+```sh
+docker compose -f deploy/compose.yaml exec -T mosquitto cat /mosquitto/data/dynamic-security.json > dynamic-security.backup.json
+```
+
+**Restore** onto a new or rebuilt broker, before it starts serving gateways:
+```sh
+docker compose -f deploy/compose.yaml cp dynamic-security.backup.json mosquitto:/mosquitto/data/dynamic-security.json
+docker compose -f deploy/compose.yaml restart mosquitto
+```
+An integration test does exactly this and checks that the restored broker knows the admin and the disabled gateways (S8-5).
+
+**If it's lost:** the broker seeds a fresh one on its next start. The admin works again, and every gateway still connects, because its access comes from the ACL file. What's lost is the list of enrolled gateways, so a later revocation registers the gateway before kicking it. Revocation itself never depends on this file: a revoked certificate is refused by the CRL.
 
 ---
 
@@ -367,4 +389,4 @@ Run `VACUUM ANALYZE readings;` once it finishes. Right after a bulk load, the vi
 **Reading the result:**
 - **FAIL** comes with the failing check and its numbers. A scenario that couldn't finish prints `FAIL  the scenario could not complete (<reason>)`; an API answer other than 2xx carries its status and body.
 - **INVALID** means a check couldn't be judged because the VM wasn't healthy *before* the fault (no 30 s of lag p95 under 2 s within 3 minutes, after the API reports its gap window warm). It isn't a pass, and demo.sh exits non-zero for it. The line gives the baseline it measured.
-- **KNOWN LIMIT** lines show a documented limit as it happened (scenario 6: an open connection keeps publishing until the broker restart drops it, S4-3). They never count as PASS or FAIL.
+- **KNOWN LIMIT** lines show a documented limit as it happened. They never count as PASS or FAIL. (Scenario 6 had one until S8-5: a revoked gateway's open connection kept publishing until a broker restart. It's now a PASS check.)

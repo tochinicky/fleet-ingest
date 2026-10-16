@@ -2,8 +2,12 @@
 # Dev PKI for the fleet-ingest lab (D6): one CA, a server certificate for the broker, one client
 # certificate per gateway and per service, and revocation with a CRL. It uses `openssl ca`, which keeps a small
 # database of what it issued (index.txt), so revoking and regenerating the CRL work like a real CA.
-# Dev only: the CA key sits unencrypted on disk next to everything else. A real fleet keeps it in an HSM or a
-# managed CA, and gateways get their keys at manufacturing or enrolment, never from a script.
+# Dev only: the CA key sits unencrypted on the operator's disk (mode 600). It's never mounted into a container and
+# never deployed (S8-5): services mount only their own certificate and key, ca.crt and crl.pem. A real fleet keeps it
+# in an HSM or a managed CA, and gateways get their keys at manufacturing or enrolment, never from a script.
+#
+# PKI_OUT=<dir> writes issued certificates and keys there instead of <dir> (the CA stays in <dir>): fleet-sim's
+# gateways go to <dir>/fleet, the one directory a container mounts whole, so it can't hold the CA key.
 #
 #   scripts/pki.sh init  <dir>                     CA, broker server cert, empty CRL
 #   scripts/pki.sh issue <dir> <cn>...             a client cert per CN (CN = gateway ID or service name)
@@ -62,12 +66,14 @@ new_key() {
 }
 
 sign() {
-  # Creates a key and a CSR for CN=$1, has the CA sign it with extension section $2, and writes $1.crt / $1.key.
-  local cn="$1" ext="$2"
-  new_key "$dir/$cn.key"
-  openssl req -new -key "$dir/$cn.key" -subj "/CN=$cn" -out "$dir/$cn.csr" 2>/dev/null
-  openssl ca -batch -config "$dir/ca.cnf" -extensions "$ext" -notext -in "$dir/$cn.csr" -out "$dir/$cn.crt" 2>/dev/null
-  rm -f "$dir/$cn.csr"
+  # Creates a key and a CSR for CN=$1, has the CA sign it with extension section $2, and writes $1.crt / $1.key
+  # into $PKI_OUT (default: the CA's own directory).
+  local cn="$1" ext="$2" out="${PKI_OUT:-$dir}"
+  mkdir -p "$out"
+  new_key "$out/$cn.key"
+  openssl req -new -key "$out/$cn.key" -subj "/CN=$cn" -out "$out/$cn.csr" 2>/dev/null
+  openssl ca -batch -config "$dir/ca.cnf" -extensions "$ext" -notext -in "$out/$cn.csr" -out "$out/$cn.crt" 2>/dev/null
+  rm -f "$out/$cn.csr"
 }
 
 regenerate_crl() {
@@ -85,6 +91,7 @@ case "$cmd" in
     echo 1000 > "$dir/crlnumber"
     ca_conf
     new_key "$dir/ca.key"
+    chmod 600 "$dir/ca.key"
     openssl req -x509 -new -key "$dir/ca.key" -sha256 -days 3650 -subj "/CN=fleet-ingest lab CA" \
       -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -out "$dir/ca.crt"
     sign mosquitto server_ext
@@ -100,7 +107,7 @@ case "$cmd" in
     prefix="${3:?prefix}"; count="${4:?count}"
     for ((i = 1; i <= count; i++)); do
       cn=$(printf "%s-%04d" "$prefix" "$i")
-      [[ -f "$dir/$cn.crt" ]] || sign "$cn" client_ext
+      [[ -f "${PKI_OUT:-$dir}/$cn.crt" ]] || sign "$cn" client_ext
     done
     echo "fleet certificates $prefix-0001 … $(printf "%s-%04d" "$prefix" "$count") in $dir"
     ;;

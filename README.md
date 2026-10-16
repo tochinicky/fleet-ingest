@@ -19,7 +19,7 @@ Built in slices; every decision and finding is in [`docs/decisions.md`](docs/dec
 | 6a | Operability: metrics, broker exporter, alerts with runbooks (14 then; 22 today), SLO with burn-rate alerts, Grafana dashboard | done |
 | 6b | Load numbers at 500 gateways, scenario 4, exact 3b accounting, persist-sqlite experiment | done |
 | 7 | Ship: commands as desired state (reconciler), lint and CI, Terraform (plan only), production profile, the real gateway end to end, demo.sh; persist-sqlite adopted (S7-7); database hangs and dropped connections survived (S7-9, S7-10); fleet-wide reads without whole-table scans (S7-11); clean reruns on a lab VM (S7-12) | done |
-| 8 | Close the open items: cold starts re-measured (S8-1), `readings` partitioned by day with retention (S8-2), the health job in its own worker (S8-3), gap explanation through an exact per-gateway checkpoint (S8-4); next revocation without a restart, always-on deployment | in progress |
+| 8 | Close the open items: cold starts re-measured (S8-1), `readings` partitioned by day with retention (S8-2), the health job in its own worker (S8-3), gap explanation through an exact per-gateway checkpoint (S8-4), revocation that closes the open connection without a broker restart (S8-5); next always-on deployment | in progress |
 
 ## Run it
 
@@ -94,7 +94,6 @@ The 4 lost readings in one jittered run were acknowledged by the broker but neve
 What the lab hasn't solved, each with its numbers in [`decisions.md`](docs/decisions.md):
 - **The open-gap window lives in memory, in the health worker:** about 12 bytes per reading in the last hour (about 17 MB at 500 gateways), growing with fleet × window. One window now, not one per API replica, but a restarted worker still warms it from the database before it publishes gaps again (S7-11, S8-3).
 - **The laptop was the limit, not the system.** On a quiet 8 vCPU / 32 GB machine every scenario passes, both persistence back ends measure the same, and the laptop's lag FAILs don't reproduce (S7-12). The load numbers above were measured on the laptop and are kept as they are; read them as a floor.
-- **Revocation needs a broker restart** to drop a revoked gateway's open connection (S4-3).
 - **Nothing is deployed:** Terraform is plan-only and CI runs once the repo is pushed (S7-3, S7-4).
 
 Design: [`docs/design/`](docs/design/README.md). Wire contract: [`docs/contract.md`](docs/contract.md).

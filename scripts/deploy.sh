@@ -20,7 +20,7 @@ target="fleet@$ip"
 
 rsync -az --delete \
   --exclude .git --exclude node_modules --exclude 'spikes/**/data' \
-  --exclude 'deploy/certs' --exclude 'deploy/terraform' --exclude 'deploy/production.env' \
+  --exclude 'deploy/certs' --exclude 'deploy/admin' --exclude 'deploy/terraform' --exclude 'deploy/production.env' \
   "$root/" "$target:/opt/fleet-ingest/"
 
 certs=(ca.crt crl.pem mosquitto.crt mosquitto.key)

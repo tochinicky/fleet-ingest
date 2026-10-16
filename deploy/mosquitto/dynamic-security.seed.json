@@ -1,0 +1,26 @@
+{
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": true
+  },
+  "clients": [
+    {
+      "username": "dynsec-admin",
+      "textname": "Operator: kicks revoked gateways. Its key never goes into a service container.",
+      "roles": [{ "rolename": "dynsec-admin" }]
+    }
+  ],
+  "groups": [],
+  "roles": [
+    {
+      "rolename": "dynsec-admin",
+      "acls": [
+        { "acltype": "publishClientSend", "topic": "$CONTROL/dynamic-security/#", "priority": 0, "allow": true },
+        { "acltype": "publishClientReceive", "topic": "$CONTROL/dynamic-security/#", "priority": 0, "allow": true },
+        { "acltype": "subscribePattern", "topic": "$CONTROL/dynamic-security/#", "priority": 0, "allow": true }
+      ]
+    }
+  ]
+}

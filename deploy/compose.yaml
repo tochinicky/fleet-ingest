@@ -22,7 +22,6 @@ x-node: &node
 x-ingest: &ingest
   <<: *node
   command: ["node", "packages/ingest/src/main.ts"]
-  volumes: ["./certs:/certs:ro"]
   restart: always
   healthcheck:
     test: ["CMD", "test", "-f", "/tmp/ingest-ready"]
@@ -45,10 +44,19 @@ services:
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - ./mosquitto/dynamic-security.seed.json:/mosquitto/config/dynamic-security.seed.json:ro
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
-      # D6: CA, broker certificate and key, CRL. Mounted, never baked into an image.
-      - ./certs:/mosquitto/certs:ro
+      # D6: the CA certificate, the broker's certificate and key, the CRL: mounted, never baked into an image. Each
+      # service mounts only its own files, and nothing mounts ca.key (S8-5; a guard test checks). The CRL is
+      # mounted as a file, which works because pki.sh rewrites it in place, so the mount sees each new version.
+      - ./certs/ca.crt:/mosquitto/certs/ca.crt:ro
+      - ./certs/crl.pem:/mosquitto/certs/crl.pem:ro
+      - ./certs/mosquitto.crt:/mosquitto/certs/mosquitto.crt:ro
+      - ./certs/mosquitto.key:/mosquitto/certs/mosquitto.key:ro
+    # The dynsec state is seeded once, then owned by the broker: it rewrites the file on every change (S8-5). After the
+    # image's entrypoint, which chowns the data volume before this runs, so the copy is chowned here.
+    command: ["sh", "-c", "[ -f /mosquitto/data/dynamic-security.json ] || { cp /mosquitto/config/dynamic-security.seed.json /mosquitto/data/dynamic-security.json && chown mosquitto:mosquitto /mosquitto/data/dynamic-security.json; }; exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"]
     ports: ["127.0.0.1:8883:8883"]
     # D3: measured RSS at 240k queued (213.5 MB with persist-sqlite, 209 MB with snapshots; S6-12) x 1.25. Overload
     # becomes counted drops at the queue bound, never an OOM kill that would also lose the last flush period.
@@ -110,6 +118,7 @@ services:
       # Through toxiproxy, so the scenarios can cut or slow the database for ingest only.
       DATABASE_URL: postgres://fleet:fleet-dev-only@toxiproxy:15432/fleet
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
+    volumes: ["./certs/ca.crt:/certs/ca.crt:ro", "./certs/ingest-1.crt:/certs/ingest-1.crt:ro", "./certs/ingest-1.key:/certs/ingest-1.key:ro"]
 
   ingest-2:
     <<: *ingest
@@ -118,6 +127,7 @@ services:
       MQTT_CLIENT_ID: ingest-2
       MQTT_CERT_FILE: /certs/ingest-2.crt
       MQTT_KEY_FILE: /certs/ingest-2.key
+    volumes: ["./certs/ca.crt:/certs/ca.crt:ro", "./certs/ingest-2.crt:/certs/ingest-2.crt:ro", "./certs/ingest-2.key:/certs/ingest-2.key:ro"]
 
   api:
     <<: *node
@@ -130,7 +140,7 @@ services:
       MQTT_CA_FILE: /certs/ca.crt
       MQTT_CERT_FILE: /certs/api.crt
       MQTT_KEY_FILE: /certs/api.key
-    volumes: ["./certs:/certs:ro"]
+    volumes: ["./certs/ca.crt:/certs/ca.crt:ro", "./certs/api.crt:/certs/api.crt:ro", "./certs/api.key:/certs/api.key:ro"]
     ports: ["127.0.0.1:8080:8080"]
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -158,7 +168,9 @@ services:
       CERTS_DIR: /certs
       GATEWAY_COUNT: ${GATEWAY_COUNT:-10}
       RECONNECT_JITTER_MAX_MS: ${RECONNECT_JITTER_MAX_MS:-0}
-    volumes: ["./certs:/certs:ro"]
+    # The simulated gateways' certificates and keys, and ca.crt: deploy/certs/fleet, the one directory a container
+    # mounts whole, which is why it holds no CA key (S8-5).
+    volumes: ["./certs/fleet:/certs:ro"]
     ports: ["127.0.0.1:8090:8090"]
     # On a brand-new broker, readings published before ingest's sessions exist have no subscriber and are discarded.
     depends_on:
@@ -180,7 +192,9 @@ services:
       MQTT_CERT_FILE: /certs/ops.crt
       MQTT_KEY_FILE: /certs/ops.key
     volumes:
-      - ./certs:/certs:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro
+      - ./certs/ops.crt:/certs/ops.crt:ro
+      - ./certs/ops.key:/certs/ops.key:ro
       - mosquitto-log:/mosquitto/log:ro
     depends_on:
       mosquitto: { condition: service_started }
