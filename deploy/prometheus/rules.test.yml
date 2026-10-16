@@ -253,6 +253,41 @@ tests:
         alertname: ReadingKeyReused
         exp_alerts: []
 
+  - name: CRL alerts by time left, warning under 7 days, critical under 2, and both on an unreadable CRL (0)
+    interval: 1m
+    input_series:
+      # promtool's clock starts at 0, so the value is the time left: 30 days, then 6 days from 20m on.
+      - series: 'broker_crl_next_update_timestamp_seconds{instance="broker-exporter:9464"}'
+        values: '2592000x19 518400x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CrlExpiringSoon
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CrlExpiringSoon
+        exp_alerts:
+          - exp_labels: { severity: warning, instance: "broker-exporter:9464" }
+            exp_annotations:
+              summary: "The broker's CRL expires in under 7 days, or can't be read: renew it, or every gateway will be refused"
+              runbook: docs/runbooks.md#renew-the-crl-alerts-crlexpiringsoon-crlexpiring
+      - eval_time: 35m
+        alertname: CrlExpiring
+        exp_alerts: []
+
+  - name: CrlExpiring is critical under 2 days, and an unreadable CRL (exported as 0) fires both
+    interval: 1m
+    input_series:
+      - series: 'broker_crl_next_update_timestamp_seconds{instance="broker-exporter:9464"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CrlExpiring
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: "broker-exporter:9464" }
+            exp_annotations:
+              summary: "The broker's CRL expires in under 2 days, or can't be read: renew it now"
+              runbook: docs/runbooks.md#renew-the-crl-alerts-crlexpiringsoon-crlexpiring
+
   - name: ReadingsTooOld fires on a single too_old dead letter, and not on other reasons
     interval: 30s
     input_series:

@@ -14,9 +14,12 @@
 
 name: fleet-ingest
 
+# One image for every Node service, built once: by `migrate`, the only service with `build:` (S8-8). The others
+# name the image and never pull it; Compose builds before it creates any container, so they find it. When several
+# services built the same tag in parallel, a first deploy failed ("image already exists") as their exports collided.
 x-node: &node
-  build: { context: .., dockerfile: Dockerfile }
   image: fleet-ingest/node:dev
+  pull_policy: never
   init: true
 
 x-ingest: &ingest
@@ -86,6 +89,8 @@ services:
 
   migrate:
     <<: *node
+    build: { context: .., dockerfile: Dockerfile }
+    pull_policy: build
     command: ["node", "packages/db/src/main.ts"]
     environment: &partition-env
       DATABASE_URL: postgres://fleet:fleet-dev-only@postgres:5432/fleet
@@ -191,10 +196,13 @@ services:
       MQTT_CA_FILE: /certs/ca.crt
       MQTT_CERT_FILE: /certs/ops.crt
       MQTT_KEY_FILE: /certs/ops.key
+      CRL_FILE: /certs/crl.pem
     volumes:
       - ./certs/ca.crt:/certs/ca.crt:ro
       - ./certs/ops.crt:/certs/ops.crt:ro
       - ./certs/ops.key:/certs/ops.key:ro
+      # The CRL the broker loads, to watch its expiry (S8-7). Rewritten in place, like the broker's mount.
+      - ./certs/crl.pem:/certs/crl.pem:ro
       - mosquitto-log:/mosquitto/log:ro
     depends_on:
       mosquitto: { condition: service_started }

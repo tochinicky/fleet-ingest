@@ -1,7 +1,7 @@
 /**
  * The post-deploy smoke check for the always-on VM (S8-6). From outside, the way a gateway and a browser reach it:
  *
- *   PUBLIC_HOST=<fqdn> API_TOKEN=... node scripts/smoke.ts
+ *   PUBLIC_HOST=<fqdn> API_TOKEN=... node scripts/smoke.ts     (Node 24: `nvm use` and `corepack pnpm install` at the repo root first)
  *
  * 1. HTTPS with a publicly trusted certificate (Node's default trust store, no -k): `/health/ready` answers ready.
  * 2. The API refuses `/fleet` without the token and serves it with it.
@@ -9,6 +9,7 @@
  * 4. MQTT on 8883: a client without a certificate is refused; a gateway certificate from the lab CA connects (TLS
  *    server name `mosquitto`), and a reading it publishes is stored and served by the API within 30 s.
  * 5. Nothing else is reachable: Postgres, Prometheus, Grafana's and the API's own ports are closed from outside.
+ * 6. The CRL (this machine's copy, which deploy.sh and gateway-admin push) is valid for at least 7 more days (S8-7).
  *
  * The smoke gateway's certificate (`smoke-gw-1`) is issued on this machine if it's missing (scripts/pki.sh). It's an
  * ordinary gateway, enrolled by connecting; revoke it with `DEPLOY_HOST=fleet@<fqdn> node scripts/gateway-admin.ts
@@ -19,6 +20,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { connect as tcpConnect } from "node:net";
 import { join } from "node:path";
 import { connectAsync } from "mqtt";
+import { crlTimes } from "../packages/broker-exporter/src/core/crl.ts";
 import { tryHandshake } from "./gatewayAdmin.ts";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -85,6 +87,9 @@ async function main(): Promise<void> {
   const open = [];
   for (const port of [5432, 9090, 9093, 3000, 8080, 9464]) if (await reachable(port)) open.push(port);
   record("nothing else is reachable from outside (5432, 9090, 9093, 3000, 8080, 9464)", open.length === 0, open.length ? `open: ${open.join(", ")}` : "all closed");
+  const { nextUpdate } = crlTimes(readFileSync(join(CERTS, "crl.pem"), "utf8"));
+  const daysLeft = nextUpdate ? (nextUpdate.getTime() - Date.now()) / 86_400_000 : 0;
+  record("the CRL is valid for at least 7 more days (renew: gateway-admin.ts renew-crl)", daysLeft >= 7, `nextUpdate ${nextUpdate?.toISOString() ?? "none"}, ${daysLeft.toFixed(1)} days left`);
   const failed = results.filter((r) => !r.pass).length;
   process.stdout.write(`smoke: ${failed ? `FAIL (${failed} of ${results.length})` : "PASS"}\n`);
   process.exit(failed ? 1 : 0);

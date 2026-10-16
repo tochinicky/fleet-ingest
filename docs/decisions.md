@@ -1373,3 +1373,41 @@ The lab stack was switched following the new runbook ("Switch broker persistence
 - **deploy.sh** takes the VM's name, copies the repo without `deploy/certs` and `deploy/admin`, then only the service certificates by name, never the CA key, the dynsec admin key or the simulated gateways' keys (S8-5).
 - **Revocation on the VM, a gap found before the first deploy:** S8-5's procedure reloaded the CRL through the *local* Compose stack, so on the VM the new CRL would never have reached its broker, and the confirmation step would have failed loudly (correctly, but with no way through). With `DEPLOY_HOST=fleet@<fqdn>`, `gateway-admin.ts` now runs Compose on the VM over SSH, writes the new CRL into the VM's copy **in place**, and reaches the broker at its public name with the server name `mosquitto`. The CA key stays on the operator's machine; only the CRL travels. "In place" matters, and `deploy.sh` now copies with `rsync --inplace` for the same reason: the broker mounts `crl.pem` as a single file, so a replaced file (a new inode) would go unseen by the running container until it was recreated.
 - **The smoke check** (`scripts/smoke.ts`, run from outside after each deploy): HTTPS with a publicly trusted certificate and `/health/ready`; the API refuses `/fleet` without its token; Grafana under `/grafana/` refuses its API without a login; MQTT refuses a client without a certificate, accepts a lab-CA gateway certificate, and a reading published over 8883 is stored and served by the API; and Postgres, Prometheus, Alertmanager, Grafana's, the API's and the metrics ports are all closed from outside.
+
+### S8-7. ⚑ The CRL's lifetime is watched and renewed: an always-on broker meets it a month after the first deploy.
+
+- **Why:** the CRL is signed for 30 days (`default_crl_days`). After its `nextUpdate`, Mosquitto refuses every client certificate, so the whole fleet, ingest included, is locked out at once. No lab ran long enough to meet it; the always-on VM (S8-6) would have, on 2026-11-14.
+- **Watching it:** the broker exporter mounts the CRL the broker loads (public data; a single-file mount, rewritten in place like the broker's), reads its `thisUpdate` and `nextUpdate` every minute with a small DER parser, and exports them. The parser is tested against what `openssl` reports for a CRL from the repo's own `pki.sh`, and a break check (`crl-expiry-misread`) is caught. An unreadable CRL exports an expiry of 0: it fails closed.
+- **Alerts:** `CrlExpiringSoon` (warning, under 7 days left, or unreadable) and `CrlExpiring` (critical, under 2 days), both with promtool tests and a runbook entry. 24 alerts now.
+- **Renewing it:** `pki.sh crl` re-signs the same list with new dates. `gateway-admin.ts renew-crl` does that, writes it in place on the target (the local stack, or the VM with `DEPLOY_HOST`), reloads, and confirms that a valid certificate still connects. The smoke check (S8-6) fails if the CRL has under 7 days left.
+- **Why not automatic:** renewal signs with the CA key, and the CA key is kept off every service machine (S8-5). Automating it on the VM would put the key there. So it's an operator task, about every 3 weeks, with an alert a week ahead. A longer CRL lifetime would mean less toil, but would let an old copy of the CRL, without later revocations, stay valid for longer.
+
+### S8-8. ⚑ Close-out: deployed and verified from outside, three first-deploy bugs fixed, and the full demo on the lab VM.
+
+- **Deployed** (2026-10-16, by the subscription's operator, from a clean checkout of the S8-6 commit): `terraform apply` created the 9 resources, and `deploy.sh` started the production profile on the Standard_B2pls_v2 VM. **The smoke check passed all 8 checks from outside:** trusted HTTPS, the API's token, Grafana behind its login, MQTT refusing a client without a certificate and accepting a lab-CA gateway, a reading stored and served end to end, every internal port closed, and the CRL with 29.4 days left. **Remote revocation worked on the VM:** the CRL reload was confirmed after 1.7 s and the kick sent at 2.2 s. The smoke gateway wasn't connected then, so there was no open session to close.
+- **Three bugs of the first real deploy, each fixed with a guard against its return:**
+  1. **The first `up --build` failed: `image "docker.io/fleet-ingest/node:dev": already exists`.** Eight services built the same image tag in parallel, and the exports collided; a rerun worked only because of the cache. Now one service, `migrate`, builds the image, and the others name it with `pull_policy: never`; Compose builds before it creates containers, so they find it. A unit test checks that exactly one service builds the image, and the lab run below starts from an empty build cache.
+  2. **HTTPS never came up: the ACME email default `admin@example.invalid`** was rejected by Let's Encrypt and ZeroSSL alike (`invalidContact`), so no certificate was issued and the TLS handshake failed. There's no placeholder any more: Caddy gets an `email` line only when `ACME_EMAIL` is set, and `deploy.sh` requires a real one. A unit test fails if the placeholder comes back.
+  3. **The smoke check needs the repo's Node 24** (it runs TypeScript directly); with an older default Node it failed on the `.ts` file. The runbook now has "After a deploy: the smoke check", with `nvm use` first.
+- **The close-out run on the lab VM** (2026-10-16, 11:40–12:40 UTC):
+  - the integration suite passed (82 tests); all 41 break checks were caught; the promtool tests passed (31 rules);
+  - **a first build from nothing** (image deleted, build cache pruned): `compose up -d --build` succeeded, which is the case that failed on the first deploy;
+  - **the full demo, 500 gateways: 12 PASS / 0 FAIL / 0 INVALID**, in 50 minutes:
+
+| # | scenario | result | min |
+|---|---|---|---|
+| 1 | duplicate storm | PASS | 3 |
+| 2 | 10% of gateways offline for 2 min | PASS | 3 |
+| 3a | Postgres down 120 s | PASS | 5 |
+| 3b | bound 5,000, Postgres down 60 s | PASS | 4 |
+| 4 | reconnect storm after a 10 min broker outage | PASS | 16 |
+| 5 | poison messages | PASS | 3 |
+| 6 | impersonation and revocation (kick, no restart) | PASS | 0 |
+| 7 | kill -9 an ingest replica | PASS | 1 |
+| 7b | ingest-1 down past a reduced bound | PASS | 4 |
+| 8 | power loss on a gateway | PASS | 1 |
+| 9 | the real gateway, 2 min WAN cut | PASS | 7 |
+| 10 | kill -9 the leading health worker | PASS | 2 |
+
+  - **the CRL watch, end to end (S8-7):** the exporter's `broker_crl_next_update_timestamp_seconds` equalled `openssl`'s `nextUpdate` to the second (1794745348); after `gateway-admin.ts renew-crl` it moved to the new date (1794746370), the broker still accepted valid certificates, and no CRL alert fired.
+- **What's left open** is in the README: the open-gap window lives in the health worker's memory, and the load numbers are the laptop's (S7-12).

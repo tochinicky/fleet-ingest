@@ -113,6 +113,34 @@ No restart: every other gateway stays connected.
 
 ---
 
+## After a deploy: the smoke check
+
+From the operator's machine, at the repo root, with the repo's Node (24; the scripts are TypeScript run directly, which older Node can't):
+```sh
+nvm use && corepack pnpm install
+PUBLIC_HOST=<fqdn> API_TOKEN=<the deployed token> node scripts/smoke.ts
+```
+It checks, from outside: trusted HTTPS and readiness, the API token, Grafana behind a login, MQTT refusing a client without a certificate and accepting a gateway's, a reading stored end to end, every internal port closed, and at least 7 days left on the CRL. `smoke: PASS` and exit 0, or the failing checks.
+
+---
+
+## Renew the CRL (alerts CrlExpiringSoon, CrlExpiring)
+
+**What it means:** the CRL is signed for 30 days (`default_crl_days`). After its `nextUpdate` the broker refuses **every** client certificate, so the whole fleet, ingest included, is locked out at once (S8-7). The exporter publishes `broker_crl_next_update_timestamp_seconds`; CrlExpiringSoon fires at 7 days left, CrlExpiring (critical) at 2. Both also fire if the CRL can't be read.
+
+**Renew it** (on the operator's machine, which holds the CA key):
+```sh
+node scripts/gateway-admin.ts renew-crl                                   # the local stack
+DEPLOY_HOST=fleet@<fqdn> node scripts/gateway-admin.ts renew-crl          # the deployed VM
+```
+It re-signs the same list with new dates, writes it in place on the target, sends SIGHUP, and confirms that a valid certificate (`ops`) still connects. It prints the new `nextUpdate`. Revoking a gateway renews the CRL too, as a side effect.
+
+**If it has already expired:** the same command fixes it; nothing else needs to restart. Gateways reconnect on their own backoff.
+
+**Make it routine:** every 3 weeks, or when CrlExpiringSoon fires. A lab's CRL never lived long enough to expire; an always-on one does.
+
+---
+
 ## Enrol a gateway
 
 `node scripts/gateway-admin.ts enrol <gateway-id>` issues its certificate (`deploy/certs/<id>.crt` and `.key`, to install on the gateway) and registers it with the dynamic security plugin with no roles, in one step, so every gateway can be kicked later (S8-5). Re-running it is harmless. A gateway enrolled before S8-5 is registered when it's first revoked.

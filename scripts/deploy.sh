@@ -2,7 +2,7 @@
 # Deploys the production profile (D8, S8-6) to the Azure VM that deploy/terraform created. Run after the apply: it
 # copies the repo and the service certificates, then starts the stack behind Caddy.
 #
-#   API_TOKEN=... GRAFANA_ADMIN_PASSWORD=... [ACME_EMAIL=...] scripts/deploy.sh "$(terraform -chdir=deploy/terraform output -raw fqdn)"
+#   API_TOKEN=... GRAFANA_ADMIN_PASSWORD=... ACME_EMAIL=<a real address> scripts/deploy.sh "$(terraform -chdir=deploy/terraform output -raw fqdn)"
 #
 # - The lab CA's private key, the dynsec admin's key and the simulated gateways' keys never leave the laptop
 #   (deploy/certs and deploy/admin are excluded from the copy, S8-5). The VM gets the CA certificate, the CRL, the
@@ -16,6 +16,9 @@ set -euo pipefail
 fqdn="${1:?usage: scripts/deploy.sh <vm-fqdn>}"
 : "${API_TOKEN:?set API_TOKEN (at least 16 characters)}"
 : "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}"
+# Let's Encrypt's account contact. Required: a placeholder is rejected (invalidContact) and HTTPS never comes up (S8-8).
+: "${ACME_EMAIL:?set ACME_EMAIL to a real address: certificate authorities reject placeholders}"
+[[ "$ACME_EMAIL" == *@*.* && "$ACME_EMAIL" != *example.* ]] || { echo "ACME_EMAIL must be a real address, not $ACME_EMAIL" >&2; exit 2; }
 root="$(cd "$(dirname "$0")/.." && pwd)"
 target="fleet@$fqdn"
 
@@ -31,7 +34,7 @@ ssh "$target" "mkdir -p /opt/fleet-ingest/deploy/certs && chmod 700 /opt/fleet-i
 # inode the running container wouldn't see (S8-6). The other files are read only at container start.
 (cd "$root/deploy/certs" && rsync -az --inplace "${certs[@]}" "$target:/opt/fleet-ingest/deploy/certs/")
 
-printf '%s\n' "PUBLIC_BIND=0.0.0.0" "PUBLIC_HOST=$fqdn" "ACME_EMAIL=${ACME_EMAIL:-admin@example.invalid}" \
+printf '%s\n' "PUBLIC_BIND=0.0.0.0" "PUBLIC_HOST=$fqdn" "ACME_EMAIL=$ACME_EMAIL" \
   "API_TOKEN=$API_TOKEN" "GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD" |
   ssh "$target" "umask 077 && cat > /opt/fleet-ingest/deploy/production.env"
 ssh "$target" "cd /opt/fleet-ingest && docker compose --env-file deploy/production.env -f deploy/compose.yaml -f deploy/compose.production.yaml up -d --build"

@@ -4,6 +4,9 @@
  *   value in `SYS_METRICS` as a gauge.
  * - Log-watch: follows the broker's log file and counts drop episodes and session expiries per client (S6-3).
  *   This is the "log-watch sidecar" of D3, folded into this one service.
+ * - The CRL's validity (S8-7): reads the CRL file the broker loads, every minute, and exports when it was issued and
+ *   when it expires. An unreadable or unparseable CRL exports an expiry of 0, so CrlExpiringSoon fires on it too:
+ *   a CRL nobody can check is treated as one about to lock every gateway out.
  */
 import { readFileSync } from "node:fs";
 import { connect } from "mqtt";
@@ -12,6 +15,7 @@ import { z } from "zod";
 import { Counter, createRegistry, Gauge, startMetricsServer } from "@fleet-ingest/observability";
 import { followLog } from "./adapters/logFollower.ts";
 import { classifyLogLine } from "./core/logEvents.ts";
+import { crlTimes } from "./core/crl.ts";
 import { parseSysValue, SYS_METRICS } from "./core/sysTopics.ts";
 
 /** Every setting the exporter reads. */
@@ -21,6 +25,8 @@ const configSchema = z.object({
   MQTT_CERT_FILE: z.string(),
   MQTT_KEY_FILE: z.string(),
   BROKER_LOG_FILE: z.string().default("/mosquitto/log/mosquitto.log"),
+  /** The CRL the broker loads (mounted read-only, public data). Unset: no CRL metrics. */
+  CRL_FILE: z.string().optional(),
   METRICS_PORT: z.coerce.number().int().min(1).max(65535).default(9464),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug"]).default("info"),
 });
@@ -62,6 +68,23 @@ function main(): void {
     logReadErrors.inc();
     log.warn({ err: error }, "reading the broker log failed; retrying");
   });
+  if (config.CRL_FILE) {
+    const crlFile = config.CRL_FILE;
+    const crlNext = new Gauge({ name: "broker_crl_next_update_timestamp_seconds", help: "When the broker's CRL expires; after it, every client certificate is refused. 0 if the CRL can't be read (S8-7).", registers });
+    const crlThis = new Gauge({ name: "broker_crl_this_update_timestamp_seconds", help: "When the broker's CRL was issued (its last renewal or revocation).", registers });
+    const readCrl = (): void => {
+      try {
+        const times = crlTimes(readFileSync(crlFile, "utf8"));
+        crlThis.set(times.thisUpdate.getTime() / 1000);
+        crlNext.set((times.nextUpdate?.getTime() ?? 0) / 1000);
+      } catch (error) {
+        crlNext.set(0);
+        log.warn({ err: error, crlFile }, "reading the CRL failed");
+      }
+    };
+    readCrl();
+    setInterval(readCrl, 60_000);
+  }
   startMetricsServer(registry, config.METRICS_PORT);
   log.info({ topics: SYS_METRICS.length, logFile: config.BROKER_LOG_FILE }, "broker exporter running");
 }

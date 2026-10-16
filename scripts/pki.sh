@@ -13,6 +13,7 @@
 #   scripts/pki.sh issue <dir> <cn>...             a client cert per CN (CN = gateway ID or service name)
 #   scripts/pki.sh issue-fleet <dir> <prefix> <n>  <prefix>-0001 … <prefix>-<n>, like fleet-sim's gateway IDs
 #   scripts/pki.sh revoke <dir> <cn>               revoke that CN's certificate and regenerate the CRL
+#   scripts/pki.sh crl <dir>                       regenerate the CRL as it is: renewal, before nextUpdate (S8-7)
 #
 # Every certificate uses an EC P-256 key: small and fast to issue, so 500 gateway certificates take seconds.
 
@@ -109,7 +110,13 @@ case "$cmd" in
       cn=$(printf "%s-%04d" "$prefix" "$i")
       [[ -f "${PKI_OUT:-$dir}/$cn.crt" ]] || sign "$cn" client_ext
     done
-    echo "fleet certificates $prefix-0001 … $(printf "%s-%04d" "$prefix" "$count") in $dir"
+    echo "fleet certificates $prefix-0001 … $(printf "%s-%04d" "$prefix" "$count") in ${PKI_OUT:-$dir}"
+    ;;
+  crl)
+    # A CRL is valid for default_crl_days (30); after its nextUpdate the broker refuses every client. Renewing
+    # re-signs the same list with new dates.
+    regenerate_crl
+    openssl crl -in "$dir/crl.pem" -noout -nextupdate
     ;;
   revoke)
     cn="${3:?cn}"

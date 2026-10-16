@@ -61,6 +61,24 @@ export const stackEnrolment: EnrolmentSteps = {
   createClient,
 };
 
+/**
+ * Renews the CRL on the stack (S8-7): regenerates it with new dates, writes it in place, reloads, and confirms that
+ * the `ops` certificate still connects, so the broker is serving the new, valid CRL. Returns the new nextUpdate.
+ */
+export async function renewStackCrl(): Promise<string> {
+  execFileSync(join(ROOT, "scripts", "pki.sh"), ["crl", STACK_CERTS], { stdio: "ignore" });
+  pushCrl();
+  stackCompose(["kill", "-s", "HUP", "mosquitto"]);
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const probe = await tryHandshake(stackEndpoint, join(STACK_CERTS, "ops.crt"), join(STACK_CERTS, "ops.key"), "ops-crl-probe");
+    if (probe === "connected") break;
+    if (Date.now() > deadline) throw new Error(`after the CRL reload, a valid certificate is still refused: ${typeof probe === "string" ? probe : probe.refused}`);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return execFileSync("openssl", ["crl", "-in", join(STACK_CERTS, "crl.pem"), "-noout", "-nextupdate"], { encoding: "utf8" }).trim();
+}
+
 /** Revocation on the stack: `pki.sh revoke`, SIGHUP, a handshake with the gateway's own certificate, `disableClient`. */
 export const stackRevocation: RevocationSteps = {
   revokeCertificate: async (cn) => pki("revoke", STACK_CERTS, cn),

@@ -39,7 +39,9 @@ services:
     image: caddy:2.11.4-alpine
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
-      ACME_EMAIL: ${ACME_EMAIL:-admin@example.invalid}
+      # Caddy's `email` line, only when ACME_EMAIL is set: certificate authorities reject a placeholder address
+      # (example.invalid got `invalidContact` from both Let's Encrypt and ZeroSSL, S8-8). deploy.sh requires it.
+      CADDY_ACME_EMAIL: ${ACME_EMAIL:+email ${ACME_EMAIL}}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

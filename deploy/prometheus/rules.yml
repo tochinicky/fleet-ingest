@@ -200,6 +200,25 @@ groups:
         annotations:
           summary: "An ingest session expired: whatever was queued for it is gone, and nothing is queued until it subscribes again"
           runbook: docs/runbooks.md#cold-start-a-new-broker-or-an-expired-ingest-session
+      - alert: CrlExpiringSoon
+        # Once the CRL's nextUpdate passes, the broker refuses every client certificate: the whole fleet is locked
+        # out (S8-7). The CRL is valid 30 days; renew it with `scripts/gateway-admin.ts renew-crl` well before. An
+        # unreadable CRL exports 0, so this fires on that too.
+        expr: broker_crl_next_update_timestamp_seconds - time() < 7 * 86400
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "The broker's CRL expires in under 7 days, or can't be read: renew it, or every gateway will be refused"
+          runbook: docs/runbooks.md#renew-the-crl-alerts-crlexpiringsoon-crlexpiring
+
+      - alert: CrlExpiring
+        expr: broker_crl_next_update_timestamp_seconds - time() < 2 * 86400
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "The broker's CRL expires in under 2 days, or can't be read: renew it now"
+          runbook: docs/runbooks.md#renew-the-crl-alerts-crlexpiringsoon-crlexpiring
+
       - alert: BrokerExporterStale
         expr: time() - broker_sys_last_update_timestamp_seconds > 60 and broker_sys_last_update_timestamp_seconds > 0
         for: 1m

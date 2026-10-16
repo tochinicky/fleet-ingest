@@ -2,8 +2,10 @@
 # (<label>.<region>.cloudapp.azure.com, a Let's Encrypt certificate), or `localhost` locally, which Caddy serves with
 # its own internal CA. The API is at the root, Grafana under /grafana/ (it serves from that sub-path itself).
 # Prometheus, Alertmanager and Postgres are never proxied.
+# The ACME account email, when there is one: `email <address>` from CADDY_ACME_EMAIL (compose.production.yaml), or
+# nothing, because certificate authorities reject placeholder addresses (S8-8).
 {
-	email {$ACME_EMAIL:admin@example.invalid}
+	{$CADDY_ACME_EMAIL}
 }
 
 {$PUBLIC_HOST} {

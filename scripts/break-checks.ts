@@ -422,6 +422,15 @@ const BREAKS: Break[] = [
     project: "unit",
     test: "scripts/certMounts.test.ts",
   },
+  {
+    name: "crl-expiry-misread",
+    rule: "The exporter reads the CRL's nextUpdate, the date after which every client is refused (S8-7)",
+    injects: "the exporter reports thisUpdate as the expiry, so an expiring CRL looks freshly issued, or already dead",
+    file: "packages/broker-exporter/src/core/crl.ts",
+    edits: [{ find: "  const next = fields[i + 1];", replace: "  const next = fields[i];" }],
+    project: "unit",
+    test: "packages/broker-exporter/test/crl.test.ts",
+  },
 ];
 
 /** Applies one break, runs its test, restores the file, and reports whether the test caught it (i.e. failed). */
