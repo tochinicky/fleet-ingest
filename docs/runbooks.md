@@ -292,9 +292,11 @@ A gap that a later replay fills disappears by itself, so recheck after the gatew
 
 **What it is:** every fault scenario in order, each PASS, FAIL or INVALID, with a summary table in `demo-results/<timestamp>/summary.txt` and an exit status of 0 only if everything passed.
 
+**Where it runs: the lab VM, never a laptop's Docker.** Demos, scenarios and integration runs go to the lab machine through `scripts/lab-vm.sh` (`LAB_HOST`, `LAB_SSH_KEY`): `sync`, then `run scripts/demo.sh` (or a scenario, or `corepack pnpm test:integration`), then `pull-results`. A laptop's 4 GB Docker VM is saturated by the 500-gateway stack and distorted every timing measured on it; on a quiet 8 vCPU / 32 GB machine the same code passes everything (decisions.md S6-6, S7-12). Typecheck, lint and unit tests run anywhere. The machine is started and stopped outside this repo, and it's billed while running, so say when a run ends.
+
 **Before starting:**
 1. **One runner, no leftovers.** Nothing else may touch the stack or toxiproxy while it runs. Check for scenario scripts, runner loops and stray `curl` or `docker` loops left by an earlier test run: `ps -axo pid,etime,command | grep -E 'scenarios/|run-|toxiproxy|8474|docker logs -f' | grep -v grep`, and stop them. A task launched hours earlier once sat polling the alert log through a whole demo; it turned out to be read-only, but proving that meant recovering the full command it was started with (S7-11).
-2. **A quiet VM.** Record what else is running (`docker ps`) and the CPU pressure (`docker run --rm alpine:3.20 head -1 /proc/pressure/cpu`). The 500-gateway stack saturates a 4 GB Docker VM on its own (S6-6).
+2. **A quiet machine.** Record what else is running (`docker ps`) and the CPU pressure (`head -1 /proc/pressure/cpu` on the lab VM; inside a container on Docker Desktop). On the lab VM it stays under 1% for the whole demo (S7-12).
 3. **Logs outside the containers.** Scenarios recreate containers, and `docker compose up` loses their logs. Stream the ones you may need (`docker logs -f fleet-ingest-<service>-1 >> file`) for the whole run.
 
 **Reading the result:**

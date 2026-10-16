@@ -129,7 +129,12 @@ interface LedgerEntry {
  * start of the body in the message, so a 503 from the API reads as what it is, not as a missing field later (S7-11).
  */
 export async function getJson<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, init).catch((error: unknown) => {
+    // fetch's own message is just "fetch failed"; the reason (ECONNREFUSED, a reset) is in its cause (S7-12).
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause : undefined;
+    const reason = (cause && "code" in cause ? String(cause.code) : undefined) ?? cause?.message ?? (error instanceof Error ? error.message : String(error));
+    throw new Error(`${init.method ?? "GET"} ${url} failed: ${reason}`);
+  });
   const text = await response.text();
   if (!response.ok) throw new Error(`${init.method ?? "GET"} ${url} answered ${response.status}: ${text.slice(0, 300)}`);
   return JSON.parse(text) as T;
@@ -424,27 +429,33 @@ export function fleetStartBudgetMs(env: NodeJS.ProcessEnv = process.env): number
 
 /**
  * Makes sure every certificate exists, brings the stack up with `gateways` virtual gateways (recreating fleet-sim if
- * the count changed), and waits until readings from every gateway are arriving, up to {@link fleetStartBudgetMs}.
+ * the count or its settings changed), and waits, up to {@link fleetStartBudgetMs}, until every gateway is delivering
+ * readings **received after this call started** and fleet-sim's control API answers.
+ *
+ * Both conditions matter when the previous scenario's fleet-sim is replaced (S7-12): counting "delivered in the last
+ * 15 s" let the old fleet-sim's readings satisfy the check while the new one was still starting, and the scenario's
+ * first `setChaos` then met a closed port ("fetch failed", scenario 5 on the lab VM, where everything else was fast
+ * enough to expose it).
  */
 export async function ensureFleet(pool: pg.Pool, gateways: number, extraFiles: string[] = []): Promise<void> {
   execFileSync(join(ROOT, "scripts", "dev-certs.sh"), [String(gateways)], { stdio: "ignore" });
+  const since = new Date();
   compose(["up", "-d", "--build"], extraFiles, { GATEWAY_COUNT: String(gateways), ...(process.env.RECONNECT_JITTER_MAX_MS ? { RECONNECT_JITTER_MAX_MS: process.env.RECONNECT_JITTER_MAX_MS } : {}), ...(process.env.BATCH_MAX_ROWS ? { BATCH_MAX_ROWS: process.env.BATCH_MAX_ROWS } : {}) });
   const budgetMs = fleetStartBudgetMs();
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
     const { rows } = await pool.query<{ n: number }>(
-      `SELECT count(DISTINCT d.gateway_id)::int AS n FROM devices d JOIN device_state s USING (device_id) WHERE s.received_at > now() - interval '15 seconds'`).catch(() => ({ rows: [{ n: 0 }] }));
-    if ((rows[0]?.n ?? 0) >= gateways) return;
+      `SELECT count(DISTINCT d.gateway_id)::int AS n FROM devices d JOIN device_state s USING (device_id) WHERE s.received_at > $1`, [since]).catch(() => ({ rows: [{ n: 0 }] }));
+    const controlUp = await fetch("http://127.0.0.1:8090/stats").then((r) => r.ok, () => false);
+    if ((rows[0]?.n ?? 0) >= gateways && controlUp) return;
     await sleep(3000);
   }
-  throw new Error(`fewer than ${gateways} gateways delivering after ${Math.round(budgetMs / 1000)} s`);
+  throw new Error(`fewer than ${gateways} gateways delivering (or fleet-sim's control API not answering) after ${Math.round(budgetMs / 1000)} s`);
 }
 
 /** Changes fleet-sim's chaos knobs (S7-5); unspecified knobs keep their value. Returns the settings now in force. */
 export async function setChaos(settings: { duplicateRate?: number; reorderWindow?: number; poisonRate?: number }): Promise<unknown> {
-  const response = await fetch("http://127.0.0.1:8090/chaos/settings", { method: "POST", body: JSON.stringify(settings) });
-  if (!response.ok) throw new Error(`fleet-sim chaos: ${response.status} ${await response.text()}`);
-  return response.json();
+  return getJson("http://127.0.0.1:8090/chaos/settings", { method: "POST", body: JSON.stringify(settings) });
 }
 
 /**

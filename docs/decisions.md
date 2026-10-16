@@ -1136,3 +1136,50 @@ The lab stack was switched following the new runbook ("Switch broker persistence
 - **Migration 006 while live:** 40.6 s. No fleet was sending (the rebuild also recreated fleet-sim), so it didn't demonstrate backpressure; to demo it, run `docker compose up -d migrate` with fleet-sim running and watch the broker queue. HealthJobFailing fired across the deploy, from the old API's timeouts before the rebuild plus one cold-cache timeout: expected deploy noise (runbook).
 - **No time-budget break check.** One that restores the whole-table query and requires a test to fail a time budget would need millions of rows and a wall-clock limit, which would be flaky on this VM. The proof is the EXPLAIN numbers above, the oracle tests, and `gaps-across-epochs` and `gaps-explained-in-window` still being CAUGHT.
 - **Stage 3's answer is time partitioning plus rollups,** not more indexes: each window touches one partition, retention is a DROP, and all-time history (gap explanation, SLO) comes from a rollup table.
+
+### S7-12. ⚑ Clean reruns on an 8 vCPU / 32 GB VM: the laptop's FAILs were the laptop, and two checks were miscalibrated.
+
+- **Why:** every timing so far came from a 4 GB Docker Desktop VM on a laptop, which the 500-gateway stack saturated on its own (S6-6; CPU pressure up to 86% in the last laptop demo). On that machine a FAIL could always be the environment. So the demo and the persistence comparison were rerun on a machine that isn't the limit.
+- **The lab VM:** an Azure Standard_D8s_v5 (8 vCPU, 32 GB; Linux 6.17, Ubuntu 24.04), Docker 29.9.1 running natively, Node 24.22. Nothing else ran on it. CPU pressure ("some" avg60) averaged 0.5% through the whole demo and never passed 5.7%.
+  - It's test infrastructure, not architecture: the design diagrams don't change.
+  - **How it's used:** `scripts/lab-vm.sh` syncs the working tree (never `.git`, certificates, keys, `.env` or Terraform state), runs a command there, and pulls `demo-results/` back. The lab makes its own certificates; no CA key leaves the machine it was made on. Demos, scenarios and integration runs go there; the laptop is for editing, typecheck, lint and unit tests.
+  - **Cost model:** billed only while running. It's deallocated between work sessions, an automatic nightly shutdown is the safety net, and nothing else runs in that Azure account.
+- **The demo** (all of scripts/demo.sh, one run): **9 PASS / 2 FAIL / 0 INVALID**, against 8 / 3 / 0 in the last laptop run. Scenario 4 took 16 min (23–25 on the laptop).
+
+| # | scenario | lab VM | last laptop run |
+|---|---|---|---|
+| 1 | duplicate storm | PASS | PASS |
+| 2 | 10% offline | PASS | PASS |
+| 3a | Postgres down 120 s | PASS | PASS |
+| 3b | bound 5,000, down 60 s | PASS | PASS |
+| 4 | reconnect storm | PASS | FAIL (setup budget, since fixed) |
+| 5 | poison | **FAIL** (a setup race) → PASS after the fix | PASS |
+| 6 | impersonation and revocation | PASS | PASS |
+| 7 | kill -9 a replica | **FAIL** (a miscalibrated check) → PASS after the fix | FAIL (VM stall) |
+| 7b | down past the bound | PASS | FAIL (VM stall) |
+| 8 | power loss | PASS | PASS |
+| 9 | the real gateway, WAN cut | PASS | PASS |
+
+- **The two FAILs couldn't be blamed on the environment, and they weren't: the quiet machine exposed check bugs that the noisy one hid.**
+  - **5 was a race in the scenarios' setup.** Scenario 4 leaves fleet-sim running with 300 s of reconnect jitter, so 5's `compose up` replaced it. `ensureFleet` counted "every gateway delivered in the last 15 s", which the *old* fleet-sim's readings satisfied, so it returned while the new one was still starting. 5's first call to fleet-sim's control API then met a closed port (5's log ended at 00:53:09 UTC; the new fleet-sim was running at 00:53:10). On the laptop everything was slow enough to hide it. **Fix:** ensureFleet counts only readings received after the call started and waits for fleet-sim's control API. A failed fetch now names its URL and cause instead of "fetch failed".
+  - **7's "lag rose" was calibrated on the laptop.** The check also demanded that lag rise above 1 s while ingest-1 was down. On the VM it was back so quickly that lag peaked at 0.9 s, and readings after it returned had p95 0.04 s. **Fix:** the check judges recovery only. That the kill had an effect is what "restarted by Docker" and "redelivery happened (unacked at the kill, none lost)" already prove. A kill that lands with nothing in flight now makes the redelivery check INVALID, because it proves nothing either way.
+  - **After the fixes, 5 and 7 each passed once on the VM.** 5: all five poison kinds dead-lettered, 66,316 of 66,316 stored, 400 readings/s before and during. 7: down 5.5 s, peak lag 5.9 s, p95 0.04 s once back, 26 unacked at the kill, none lost.
+- **The persistence comparison, the clean version of S6-15/S7-7:** broker restart ×3, scenario 7 ×3 and 3b ×1 on each back end, `compose down` between runs, and the snapshot runs on a fresh volume (there's no migration between back ends, S6-14). **14 of 14 PASS.** Scenario 7 here ran before the check fix above, and passed anyway: lag rose past 1 s in every run.
+
+| | persist-sqlite | snapshots |
+|---|---|---|
+| broker restart, lost | 0 of 21,016 / 21,000 / 21,032 | 0 of 20,948 / 20,959 / 20,958 |
+| broker restart, all 500 back | 6 s, 6 s, 6 s | 6 s, 6 s, 6 s |
+| 7, lost | 0 of 32,906 / 32,663 / 27,722 | 0 of 27,776 / 29,944 / 29,724 |
+| 7, unacked at the kill / DUP | 18 / 44, 32 / 9, 35 / 21 | 17 / 39, 18 / 47, 39 / 40 |
+| 7, peak lag while down | 6.5, 5.7, 3.7 s | 3.9, 4.1, 3.7 s |
+| 7, p95 once back | 0.04, 0.04, 0.04 s | 0.04, 0.04, 0.04 s |
+| 3b, lost ≤ counted | 16,060 ≤ 16,310 | 15,230 ≤ 15,730 |
+| 3b, peak queue / drain | 14,057 / 28.2 s | 14,056 / 19.5 s |
+
+- **What it settles:**
+  - **No measurable difference between the back ends on a quiet machine.** The laptop's lag and DUP differences (S7-7) were noise. DUP is set on both, with no pattern (S7-7's "lower on sqlite" doesn't reproduce).
+  - **The laptop's FAILs in 7 and 7b were the laptop.** Both pass on every run here, and the stall rule never had anything to excuse (no broker timeouts, CPU pressure under 1% at the kills).
+  - **A clean broker restart lost nothing on snapshots either.** S7-8 expected that check to fail on the snapshot fallback. The broker log confirms snapshots were in use ("Saving in-memory database", "Restored 599 base messages"). On a quiet machine ingest re-subscribes in 250 ms, before the gateways' first readings after the restart arrive, so the S3-9 window exists but never opened. It's timing-dependent, not closed. So this check can't tell the back ends apart on a fast machine; the difference that matters is a broker crash, which the persist-sqlite canaries pin (S6-14).
+  - **Still recorded:** 3b's status accounting stayed within ±300 on both (250 and 500 drops beyond the readings, against 167 and 421 statuses unwritten).
+- **Still open after this:** nothing fails on the quiet machine. The cold-start peaks of S7-11 (health and clock-skew passes of 4–8 s on the laptop) weren't re-measured here; they were a laptop measurement, and the open item stands until they are.

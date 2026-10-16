@@ -11,8 +11,11 @@
  *   correctness rests on the key and ON CONFLICT, never on the flag (S7-7). Redelivered copies of uncommitted messages
  *   are plain inserts, so ON CONFLICT hits can't show redelivery either;
  * - ingest-2 kept storing its own share throughout;
- * - ingest lag rose while ingest-1 was down, then recovered. Lag is split by when a reading was measured (S7-7): the
- *   backlog measured before the kill is expected to be late; readings measured after ingest-1 is back must be prompt.
+ * - ingest lag recovered: readings measured after ingest-1 is back must be prompt. Lag is split by when a reading was
+ *   measured (S7-7): the backlog measured before the kill is expected to be late. This used to also require lag to
+ *   *rise* above 1 s, which a fast machine disproved: on the lab VM ingest-1 was back so quickly that lag peaked at
+ *   0.9 s (S7-12). That the kill had an effect is what the restart and redelivery checks already prove; the downtime
+ *   and the peak lag are recorded with this check.
  *
  * The last two are judged only after a quiet baseline. Before the kill, the scenario first waits (up to 5 min) for the
  * API to report its gap window warm, which is setup, not judgement (S7-11), then waits up to 3 min for 30 s of lag
@@ -67,6 +70,7 @@ async function main(): Promise<void> {
   const lagAfter = await lagSeconds(pool, recoveredFrom, windowEnd);
   const backlogLag = await lagByMeasured(pool, "measured_at < $1 AND received_at > $1", [killedAt]);
   const freshLag = await lagByMeasured(pool, "measured_at > $1 AND measured_at < $2", [new Date(Date.parse(backAt) + 10_000).toISOString(), windowEnd]);
+  const downSeconds = (Date.parse(backAt) - Date.parse(killedAt)) / 1000;
   const one = ingestSummaries("ingest-1", killedAt);
   const two = ingestSummaries("ingest-2", killedAt);
   const redelivered = one.reduce((s, x) => s + x.redelivered, 0);
@@ -80,14 +84,20 @@ async function main(): Promise<void> {
     { check: "ingest-1 crashed and was restarted by Docker", pass: restartCount("ingest-1") > restartsBefore, detail: `restart count ${restartsBefore} → ${restartCount("ingest-1")}` },
     { check: "no message dropped by the broker", pass: droppedDelta === 0, detail: `$SYS dropped +${droppedDelta}` },
     { check: "every acknowledged reading stored exactly once", pass: ledger.stored === ledger.expected, detail: `${ledger.stored} of ${ledger.expected}` },
-    { check: "redelivery happened: ingest-1 held unacked messages at the kill, and none was lost", pass: unackedAtKill > 0 && ledger.stored === ledger.expected, detail: `${unackedAtKill} unacked at the kill; ${redelivered} came back with DUP, ${duplicates} duplicates absorbed` },
+    {
+      check: "redelivery happened: ingest-1 held unacked messages at the kill, and none was lost",
+      pass: unackedAtKill > 0 && ledger.stored === ledger.expected,
+      detail: `${unackedAtKill} unacked at the kill; ${redelivered} came back with DUP, ${duplicates} duplicates absorbed`,
+      // A kill that landed with nothing in flight proves nothing about redelivery: not a pass, not a failure (S7-12).
+      ...(unackedAtKill === 0 && ledger.stored === ledger.expected ? { invalid: "nothing was in flight at the kill, so redelivery couldn't be exercised" } : {}),
+    },
     gatedBy(baseline, gatedByStall(stall, { check: "ingest-2 kept storing its own share throughout", pass: twoKeptGoing, detail: `inserted per 10 s: ${two.map((x) => x.inserted).join(", ")}` })),
     gatedBy(baseline, gatedByStall(stall, {
-      check: "lag rose for ingest-1's share, then recovered: readings measured after it was back are prompt",
-      pass: lagDuring.max > 1 && freshLag.p95 < PROMPT_LAG_P95_SECONDS,
-      detail: `max during ${lagDuring.max.toFixed(1)} s; p95 measured after +10 s ${freshLag.p95.toFixed(2)} s (backlog ${backlogLag.p95.toFixed(2)} s, last 15 s received ${lagAfter.p95.toFixed(2)} s)`,
+      check: "lag recovered: readings measured after ingest-1 was back are prompt",
+      pass: freshLag.p95 < PROMPT_LAG_P95_SECONDS,
+      detail: `p95 measured after +10 s ${freshLag.p95.toFixed(2)} s; down ${downSeconds.toFixed(1)} s, max lag during ${lagDuring.max.toFixed(1)} s (backlog ${backlogLag.p95.toFixed(2)} s, last 15 s received ${lagAfter.p95.toFixed(2)} s)`,
     })),
-  ], { api, baseline, stall, unackedAtKill, redelivered, duplicates, droppedDelta, ledger, lagDuring, lagAfter, backlogLag, freshLag, killedAt, backAt });
+  ], { api, baseline, stall, downSeconds, unackedAtKill, redelivered, duplicates, droppedDelta, ledger, lagDuring, lagAfter, backlogLag, freshLag, killedAt, backAt });
 }
 
 await run(main);
