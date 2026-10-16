@@ -99,6 +99,8 @@ It does, in this order, and stops with an error at the first step that doesn't w
 
 No restart: every other gateway stays connected.
 
+**On the deployed VM** (S8-6), the same command with the VM's name: `DEPLOY_HOST=fleet@<fqdn> node scripts/gateway-admin.ts revoke <gateway-id>`. It revokes on this machine (the CA key never leaves it), writes the new CRL into the VM's copy in place, reloads and confirms there, and kicks over 8883.
+
 **If it stops at step 3:** the broker didn't load the CRL. Check that `deploy/certs/crl.pem` changed (`openssl crl -in deploy/certs/crl.pem -noout -text | grep -A1 Serial`), and that the broker logged the reload. Then run step 2 by hand (`docker compose -f deploy/compose.yaml kill -s HUP mosquitto`) and run the script again: revoking twice is harmless. Only if the CRL can't be loaded at all, fall back to a broker restart, which drops every connection; persist-sqlite keeps the queues (S6-15).
 
 **Verify it stayed out:**

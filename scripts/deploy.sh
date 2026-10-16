@@ -27,7 +27,9 @@ rsync -az --delete \
 certs=(ca.crt crl.pem mosquitto.crt mosquitto.key)
 for cn in ingest-1 ingest-2 api ops; do certs+=("$cn.crt" "$cn.key"); done
 ssh "$target" "mkdir -p /opt/fleet-ingest/deploy/certs && chmod 700 /opt/fleet-ingest/deploy/certs"
-(cd "$root/deploy/certs" && rsync -az "${certs[@]}" "$target:/opt/fleet-ingest/deploy/certs/")
+# --inplace: the broker mounts crl.pem as a single file, so a re-deploy must rewrite it, not replace it with a new
+# inode the running container wouldn't see (S8-6). The other files are read only at container start.
+(cd "$root/deploy/certs" && rsync -az --inplace "${certs[@]}" "$target:/opt/fleet-ingest/deploy/certs/")
 
 printf '%s\n' "PUBLIC_BIND=0.0.0.0" "PUBLIC_HOST=$fqdn" "ACME_EMAIL=${ACME_EMAIL:-admin@example.invalid}" \
   "API_TOKEN=$API_TOKEN" "GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD" |
