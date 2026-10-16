@@ -16,7 +16,8 @@ import { isDatabaseTimeout } from "./databasePool.ts";
 import { advanceCursor, deltaLowerBound, GapWindow } from "./core/gapWindow.ts";
 import { allGateways, databaseNow, devices, gatewayReadingsSince, readingsStoredAfter } from "./queries.ts";
 import type { StoredReading } from "./queries.ts";
-import { commandOf, gapsInWindow } from "./healthReport.ts";
+import { commandOf } from "./healthReport.ts";
+import { checkpointedGapsInWindow, oldestRetained } from "./gapCheckpointStore.ts";
 
 /** The SLO threshold: a reading must be queryable within this long of being measured (S6-1). */
 export const SLO_SECONDS = 30;
@@ -54,6 +55,7 @@ interface HealthMetrics {
   commandsPending: Gauge<"connected">;
   commandsStuck: Gauge;
   keyReuse: Counter<"gateway">;
+  gapCheckpoint: Counter<"outcome">;
 }
 
 /** Creates the job's metrics on `registry`. */
@@ -92,6 +94,10 @@ function createHealthMetrics(registry: Registry): HealthMetrics {
     gapStepSeconds: new Gauge({ name: "fleet_health_gaps_step_seconds", help: "Each step of the last gaps pass: read (the delta), window (add, prune, open gaps), explain (S7-11).", labelNames: ["step"], registers }),
     gapDeltaRows: new Gauge({ name: "fleet_health_gap_delta_rows", help: "Rows the last gaps pass read behind its cursor, overlap included (S7-11).", registers }),
     gapWindowReadings: new Gauge({ name: "fleet_health_gap_window_readings", help: "Readings held in memory for the last hour's open gaps, about 12 bytes each (S7-11).", registers }),
+    gapCheckpoint: new Counter({
+      name: "fleet_gap_checkpoint_total", labelNames: ["outcome"], registers,
+      help: "Gap explanations per gateway with drops: resumed from its checkpoint, or recomputed from scratch and why (S8-4).",
+    }),
     keyReuse: new Counter({
       name: "fleet_reading_key_reuse_total", labelNames: ["gateway"], registers,
       help: "Readings whose (device, epoch, seq) was seen again within the hour with another measured_at: a producer bug, stored as two rows (S8-2).",
@@ -257,7 +263,9 @@ async function retrying<T>(work: () => Promise<T>, onError: (error: unknown) => 
  * One gaps pass (S7-11): reads what was stored since the cursor (minus the overlap: `CURSOR_OVERLAP_MS` in core/gapWindow.ts),
  * adds it to the window, drops what aged out of the hour, and reads the open gaps from memory. Gaps are explained
  * against each gateway's lifetime counter (S5-9): only a gateway that has dropped readings *and* has a gap now needs
- * its history, read per gateway (about 50 ms); for every other gateway its gaps are unexplained by definition.
+ * its history, and since S8-4 it reads it through its checkpoint, so only the last hour unless something invalidated
+ * the checkpoint (`fleet_gap_checkpoint_total{outcome}` says which); for every other gateway its gaps are
+ * unexplained by definition.
  */
 async function updateGaps(pool: pg.Pool, metrics: HealthMetrics, tracker: GapTracker, now: Date): Promise<void> {
   const nowMs = now.getTime();
@@ -284,8 +292,14 @@ async function updateGaps(pool: pg.Pool, metrics: HealthMetrics, tracker: GapTra
   const dropped = new Map((await allGateways(pool)).map((g) => [g.gatewayId, g.dropped ?? 0]));
   const withGaps = [...new Set(open.map((g) => g.gatewayId))];
   const explained = new Map<string, Array<{ missing: number; explained: boolean }>>();
-  for (const id of withGaps.filter((g) => (dropped.get(g) ?? 0) > 0)) {
-    explained.set(id, await gapsInWindow(pool, id, dropped.get(id) ?? 0, new Date(from), now, now));
+  const withDrops = withGaps.filter((g) => (dropped.get(g) ?? 0) > 0);
+  if (withDrops.length) {
+    const pass = { passStartedAt: await databaseNow(pool), retainedFrom: await oldestRetained(pool) };
+    for (const id of withDrops) {
+      const result = await checkpointedGapsInWindow(pool, id, dropped.get(id) ?? 0, new Date(from), now, pass);
+      metrics.gapCheckpoint.labels(result.recomputed ?? "resumed").inc();
+      explained.set(id, result.gaps);
+    }
   }
   const all = withGaps.flatMap((id) => explained.get(id) ?? open.filter((g) => g.gatewayId === id).map((g) => ({ missing: g.missing, explained: false })));
   const missingExplained = all.filter((g) => g.explained).reduce((s, g) => s + g.missing, 0);

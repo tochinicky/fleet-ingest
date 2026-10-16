@@ -76,7 +76,8 @@ async function currentIngestLag(pool: pg.Pool): Promise<number | null> {
  * A gateway that never dropped anything can't have an explained gap, so its history isn't read at all: only gaps
  * from `from` on (S7-11). That gives the same gaps in the window, because a gap whose `before` is in the window
  * starts at a reading measured in it. The all-time scan is left for gateways with drops, and its cost grows with
- * their history; S7-11 says when that stops being good enough.
+ * their history. The health worker uses the checkpointed version instead (`checkpointedGapsInWindow`, S8-4); this one
+ * serves `/devices/:id/gaps`, an on-demand read for any window, and is the reference the checkpoint is tested against.
  */
 export async function gapsInWindow(pool: pg.Pool, gatewayId: string, droppedTelemetry: number, from: Date, to: Date, now: Date): Promise<ReturnType<typeof explainGaps>> {
   const since = droppedTelemetry > 0 ? new Date(0) : from;

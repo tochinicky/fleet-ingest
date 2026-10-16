@@ -29,7 +29,7 @@ describe("applyMigrations", () => {
     const migrations = loadMigrations(MIGRATIONS_DIR);
     const [a, b] = [await connect(), await connect()];
     const results = await Promise.all([applyMigrations(a, migrations), applyMigrations(b, migrations)]);
-    expect(results.flat()).toEqual(["001_initial_schema.sql", "002_status_received_at.sql", "003_offline_received_at.sql", "004_slo_columns.sql", "005_desired_mode.sql", "006_readings_fleet_reads.sql", "007_readings_partitioned.sql", "008_health_snapshot.sql"]);
+    expect(results.flat()).toEqual(["001_initial_schema.sql", "002_status_received_at.sql", "003_offline_received_at.sql", "004_slo_columns.sql", "005_desired_mode.sql", "006_readings_fleet_reads.sql", "007_readings_partitioned.sql", "008_health_snapshot.sql", "009_gap_checkpoints.sql"]);
     expect(await applyMigrations(a, migrations)).toEqual([]);
     const { rows } = await a.query("SELECT to_regclass('public.readings') AS readings, to_regclass('public.dead_letters') AS dead_letters");
     expect(rows[0]).toEqual({ readings: "readings", dead_letters: "dead_letters" });

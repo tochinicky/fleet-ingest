@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@fleet-ingest/contract": "workspace:*",
+    "@fleet-ingest/db": "workspace:*",
     "@fleet-ingest/observability": "workspace:*",
     "fastify": "5.12.5",
     "mqtt": "5.16.0",
@@ -16,7 +17,6 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@fleet-ingest/db": "workspace:*",
     "@testcontainers/postgresql": "12.2.0",
     "@types/pg": "8.23.1",
     "fast-check": "4.10.2",

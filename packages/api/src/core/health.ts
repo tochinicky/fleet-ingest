@@ -133,14 +133,43 @@ export interface Gap {
  * not which.
  */
 export function explainGaps(gaps: Gap[], droppedTelemetry: number): Array<Gap & { explained: boolean }> {
-  let budget = Math.max(0, droppedTelemetry);
-  let stopped = false;
-  return [...gaps]
-    .sort((a, b) => a.before.getTime() - b.before.getTime())
-    .map((gap) => {
-      const explained = !stopped && gap.missing <= budget;
-      if (explained) budget -= gap.missing;
-      else stopped = true;
-      return { ...gap, explained };
-    });
+  return explainFrom(initialExplainState(droppedTelemetry), gaps).explained;
+}
+
+/** Where an oldest-first explanation stands: how much of the counter is left, and whether a gap has stopped it. */
+export interface ExplainState {
+  budget: number;
+  stopped: boolean;
+}
+
+/** The state before any gap: the whole lifetime counter, not stopped. */
+export function initialExplainState(droppedTelemetry: number): ExplainState {
+  return { budget: Math.max(0, droppedTelemetry), stopped: false };
+}
+
+/**
+ * The order gaps are explained in: oldest `before` first, then by device, epoch and seq, so that two gaps with the
+ * same `before` (two devices measured in the same millisecond) are always taken in the same order. Without the
+ * tie-break, a checkpointed explanation and a from-scratch one could take tied gaps in different orders and disagree
+ * when the budget runs out between them (S8-4).
+ */
+export function compareGaps(a: Gap, b: Gap): number {
+  return a.before.getTime() - b.before.getTime() || (a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0)
+    || a.epoch - b.epoch || a.fromSeq - b.fromSeq;
+}
+
+/**
+ * {@link explainGaps}, resumable: explains `gaps` oldest first starting from `state`, and returns the state after
+ * them. Explaining a prefix and then the rest from the returned state gives exactly the result of explaining both at
+ * once, which is what lets a checkpoint stand in for the prefix (S8-4).
+ */
+export function explainFrom(state: ExplainState, gaps: Gap[]): { explained: Array<Gap & { explained: boolean }>; state: ExplainState } {
+  let { budget, stopped } = state;
+  const explained = [...gaps].sort(compareGaps).map((gap) => {
+    const fits = !stopped && gap.missing <= budget;
+    if (fits) budget -= gap.missing;
+    else stopped = true;
+    return { ...gap, explained: fits };
+  });
+  return { explained, state: { budget, stopped } };
 }

@@ -193,6 +193,9 @@ importers:
       '@fleet-ingest/contract':
         specifier: workspace:*
         version: link:../contract
+      '@fleet-ingest/db':
+        specifier: workspace:*
+        version: link:../db
       '@fleet-ingest/observability':
         specifier: workspace:*
         version: link:../observability
@@ -212,9 +215,6 @@ importers:
         specifier: 4.6.5
         version: 4.6.5
     devDependencies:
-      '@fleet-ingest/db':
-        specifier: workspace:*
-        version: link:../db
       '@testcontainers/postgresql':
         specifier: 12.2.0
         version: 12.2.0

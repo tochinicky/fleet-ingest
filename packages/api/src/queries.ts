@@ -155,7 +155,7 @@ export async function gaps(pool: pg.Pool, from: Date, to: Date, gatewayId?: stri
        SELECT r.epoch, r.seq, lag(r.seq) OVER per_epoch AS prev_seq, lag(r.measured_at) OVER per_epoch AS prev_at
        FROM readings r
        WHERE r.device_id = d.device_id AND r.measured_at BETWEEN $1 AND $2
-       WINDOW per_epoch AS (PARTITION BY r.epoch ORDER BY r.seq)
+       WINDOW per_epoch AS (PARTITION BY r.epoch ORDER BY r.seq, r.measured_at)
      ) g
      WHERE ($3::text IS NULL OR d.gateway_id = $3) AND g.seq - g.prev_seq > 1
      ORDER BY d.gateway_id, before`,
