@@ -1,0 +1,28 @@
+# The sizing run (decisions.md S8-6): the production profile's cloud services inside one systemd slice capped like the
+# target VM, so their memory and CPU add up the way they would on it. The real gateway, its simulated home and the
+# simulated gateways stand in for homes elsewhere: they run outside the slice, as load, and reach the broker directly.
+#   used by scripts/sizing/run.sh, on top of compose.yaml, compose.production.yaml and compose.with-gateway.yaml
+x-capped: &capped
+  cgroup_parent: fleetsizing.slice
+
+services:
+  mosquitto: *capped
+  postgres: *capped
+  migrate: *capped
+  partitions: *capped
+  ingest-1: *capped
+  ingest-2: *capped
+  api: *capped
+  health-worker: *capped
+  broker-exporter: *capped
+  alert-logger: *capped
+  prometheus: *capped
+  alertmanager: *capped
+  grafana: *capped
+  cadvisor: *capped
+  caddy: *capped
+  gateway:
+    environment:
+      Uplink__Host: mosquitto
+      Uplink__Port: "8883"
+    depends_on: !override [inverter-sunspec, toxiproxy-home, battery, meter, mosquitto]

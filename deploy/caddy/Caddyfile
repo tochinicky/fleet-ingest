@@ -1,16 +1,17 @@
-# D8: Caddy in front of the API and Grafana, with automatic HTTPS. On the VM, the hosts are sslip.io names for its
-# IP (a public certificate from Let's Encrypt); locally they're *.localhost names, which Caddy serves with its own
-# internal CA. Prometheus, Alertmanager and Postgres are never proxied.
+# D8, S8-6: Caddy in front of the API and Grafana, with automatic HTTPS, on one name: the VM's DNS label
+# (<label>.<region>.cloudapp.azure.com, a Let's Encrypt certificate), or `localhost` locally, which Caddy serves with
+# its own internal CA. The API is at the root, Grafana under /grafana/ (it serves from that sub-path itself).
+# Prometheus, Alertmanager and Postgres are never proxied.
 {
 	email {$ACME_EMAIL:admin@example.invalid}
 }
 
-{$API_HOST} {
+{$PUBLIC_HOST} {
 	encode zstd gzip
-	reverse_proxy api:8080
-}
-
-{$GRAFANA_HOST} {
-	encode zstd gzip
-	reverse_proxy grafana:3000
+	handle /grafana/* {
+		reverse_proxy grafana:3000
+	}
+	handle {
+		reverse_proxy api:8080
+	}
 }

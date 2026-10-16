@@ -1321,3 +1321,53 @@ The lab stack was switched following the new runbook ("Switch broker persistence
 | **The dynsec admin key** | It can kick any client and, because either plugin can grant, add a role that opens topics. Kept like the CA key: `deploy/admin/certs`, mounted nowhere, never deployed. Less powerful than the CA key: it can't create identities. |
 
 - **Tests:** on a real broker with the repo's config: a kick alone lets the gateway straight back in (the trap, pinned); enrol then revoke closes the open connection within 5 s of the kick and refuses the reconnect as revoked; backup and restore. On the lab VM the integration suite passed (82 tests) and all 39 break checks were caught, including `kick-before-crl-confirmed` and `dynsec-defaults-allow` (dynsec's default send set to allow: the ACL test that a gateway can't publish as another fails).
+
+### S8-6. ⚑ Always-on on Azure (a D8 change): one Standard_B2pls_v2 VM, sized by measurement, Terraform with azurerm.
+
+- **Why:** D8 targeted a Hetzner VM, plan-only. The deployment moves to Azure, inside the existing credit, with a spend target of ≤ $30/month and always on (no nightly shutdown). Applying it, and every Azure operation, is done by the subscription's operator, never by the build.
+- **Prices** (Azure retail prices API, queried 2026-10-16; Linux pay-as-you-go, USD, 730 h; Germany West Central and West Europe identical). Each total adds a 32 GiB Standard SSD (E4, $2.40) and a static Standard IPv4 ($3.65). Egress is negligible, under the free 100 GB/month:
+
+| size | vCPU / RAM | VM | total | |
+|---|---|---|---|---|
+| B2ats_v2 | 2 / 1 GiB | $7.88 | $13.93 | below the build's 0.94 GiB |
+| B1ms | 1 / 2 GiB | $17.52 | $23.57 | Bv1: End of Life, announced retirement |
+| **B2pls_v2** (Arm) | 2 / 4 GiB | $28.03 | **$34.08** | the cheapest current 4 GiB size |
+| B2als_v2 | 2 / 4 GiB | $31.54 | $37.59 | |
+| B2s | 2 / 4 GiB | $35.04 | $41.09 | Bv1: End of Life |
+
+  Microsoft lists Bv1 (B1ms, B2s) as End of Life and says to use current sizes for new deployments. The current burstable families (Basv2, Bsv2, Bpsv2) go from 1 GiB straight to 4 GiB. So nothing current fits under $30, and B2pls_v2 is $4.08 over the target, inside the credit. That's a decision for the person who owns the spend, not the build: put to them on 2026-10-16, with this measurement. The module is plan-only until then.
+- **The measurement (sizing harness `scripts/sizing/`, on the lab VM):** the production profile's 15 cloud services in one systemd slice capped like the target VM (MemoryMax, no swap, CPUQuota), the real gateway with its simulated home and 10 simulated gateways outside it as load, sampled every 5 s through five phases: a from-scratch build of the Node image inside the cap (BuildKit in a container in the slice), a cold start with the page cache dropped, 20 min steady, a redeploy rebuilding the image while the stack runs, and a second cold start.
+
+| phase | 1 vCPU / 2 GiB | 2 vCPU / 4 GiB |
+|---|---|---|
+| build | 934 MB max, 29% CPU | 937 MB, 29% |
+| cold start | 2,047 MB, 25% | 3,083 MB, 26% |
+| steady 20 min | 2,044 MB, **11.0%** | 3,046 MB, **11.1%** |
+| redeploy | 2,047 MB, 27% | 3,535 MB, 25% |
+| second cold start | 2,047 MB, 27% | 2,897 MB, 25% |
+
+  - **These figures are `memory.current`, which includes page cache,** and cache fills whatever the cap allows. So a run at 2,047 of 2,048 MB looked like a box at its limit when most of it was reclaimable cache. The working set is the anonymous memory, sampled separately (max / median MB, and memory pressure "full", the share of time every task stalled on memory):
+
+| phase | under 2 GiB | under 4 GiB |
+|---|---|---|
+| cold start | 989 / 984, pressure 0.02% | 1,023 / 982, 0 |
+| steady | 960 / 899, 0 | 1,013 / 926, 0 |
+| redeploy | **1,400** / 963, **0.66%** | 976 / 916, 0 |
+| second cold start | 1,025 / 997, **1.47%** | 930 / 909, 0 |
+
+    The working set is about 0.9–1.0 GiB and reaches 1.4 GiB in a redeploy. Under 2 GiB that's where real memory stalls appear; under 4 GiB there are none in any phase. The services' own sizes: Grafana 365 MB, cAdvisor 235, the health worker 205, Prometheus 132, Postgres 111, the rest under 75 each. **No OOM kill in any phase of either run**, and every service was up at the end.
+  - **CPU, against the credit model:** steady 0.11 vCPU. B2pls_v2's baseline is 30% of 2 vCPU = 0.6 vCPU, banking 36 credits/h (one credit is one vCPU-minute at 100%) up to 864. At 0.11 it banks about 29 a hour net and fills the bank in about 29 h. Cold starts and redeploys average 0.25–0.27 vCPU, still under the baseline. So it never throttles in steady state; it can't run its credits down, because it never spends them. The measurement was on the lab VM's x86 cores; at half the speed on Ampere it would still bank about 23 an hour.
+  - **Health over the 20 min steady phase, both caps:** ingest lag p95 0.048 s (max bucket 0.1 s under 2 GiB, 0.05 s under 4 GiB); 10,560 readings stored (8.8/s: the real gateway and 10 simulated ones); health-job pass p99 0.09 s and 0.05 s; no database retries, no broker drops, no health-job failures, no container restarts.
+  - **The image is built on the box.** The build peaks at about 0.94 GiB for about 35 s and fits beside the running stack. Building in CI and pulling from a registry would matter only on a 2 GiB box, and would need an arm64 build in CI; it's the path if the box ever gets tight.
+  - **Two harness bugs, found and fixed:** systemd reads a dash in a slice name as hierarchy (`fleet-sizing.slice` lives under `fleet.slice`), and buildx's docker-container driver ignored its cgroup-parent option, which would have built outside the cap. The harness now uses `fleetsizing.slice` and runs BuildKit itself in the slice as a remote builder, after checking that its process's cgroup is inside. And **a silent `|| true` hid a failed measurement:** `curl` took `[15m]` in a raw URL as a glob range, failed, and with `-s` and `|| true` wrote empty files that looked like a run with no data. The queries now go through `--data-urlencode` and fail loudly, and `scripts/sizing/health.sh` recovered the verdict from Prometheus's own data, which `compose down` keeps.
+- **The production profile, trimmed for one small box:** toxiproxy (the lab's chaos proxy) doesn't run, and ingest reaches Postgres directly; Prometheus keeps 7 days. **Both ingest replicas stay:** failover is the design. One replica would save about 68 MB, which doesn't change the size.
+- **Arm64:** every image in the production profile publishes linux/arm64, checked from their manifests (caddy, eclipse-mosquitto, cadvisor, grafana, postgres, alertmanager, prometheus, node:24.21.0-slim). The module picks Ubuntu 24.04's arm64 image for an Arm size.
+- **One name, no domain:** the public IP's DNS label (`<label>.germanywestcentral.cloudapp.azure.com`). Caddy gets a Let's Encrypt certificate for it and serves the API at `/` and Grafana under `/grafana/` (Grafana's own sub-path serving). That replaces the two sslip.io names, so there's no dependency on a third party's DNS. Gateways connect to the same name on 8883.
+- **Terraform** (`deploy/terraform`, azurerm 4.14.0), 9 resources in one resource group (`terraform destroy` removes everything):
+  - a VNet and subnet;
+  - an NSG allowing 22 from the operator's ranges only (validated: never 0.0.0.0/0), and 80, 443 and 8883 from the Internet; everything else is denied;
+  - a static Standard public IP with the DNS label, and a NIC;
+  - the VM: Ubuntu 24.04, Standard SSD, cloud-init (Docker, the `fleet` user in its group), password login off, no auto-shutdown.
+
+  `vm_size` has no default, because it's what the approval is about. The subscription is passed explicitly, never taken from the CLI's default account. The plan is run and applied by the subscription's operator. The Hetzner module is removed rather than kept beside it, so no unused provider drifts.
+- **deploy.sh** takes the VM's name, copies the repo without `deploy/certs` and `deploy/admin`, then only the service certificates by name, never the CA key, the dynsec admin key or the simulated gateways' keys (S8-5).

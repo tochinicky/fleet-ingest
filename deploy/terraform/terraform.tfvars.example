@@ -1,6 +1,7 @@
-# Copy to terraform.tfvars (gitignored) and fill in. The token goes in the environment instead:
-#   export TF_VAR_hcloud_token=...
-server_type    = "" # chosen with the D8 approval: at least 4 vCPU / 8 GB
-location       = "fsn1"
+# Copy to terraform.tfvars (gitignored) and fill in. The subscription goes in the environment instead:
+#   export TF_VAR_subscription_id=...
+vm_size        = "" # chosen with the spend approval (decisions.md S8-6)
+location       = "germanywestcentral"
+dns_label      = "fleet-ingest-lab"
 ssh_public_key = "ssh-ed25519 AAAA... you@laptop"
 admin_cidrs    = ["203.0.113.10/32"]

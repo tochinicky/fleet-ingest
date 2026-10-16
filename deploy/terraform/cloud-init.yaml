@@ -1,6 +1,6 @@
 #cloud-config
-# Prepares the VM for scripts/deploy.sh: Docker and Compose from Ubuntu's archive, a non-root `fleet` user in the
-# docker group with the operator's key, password login off, and unattended security updates.
+# Prepares the VM for scripts/deploy.sh: Docker and Compose from Ubuntu's archive, the `fleet` admin user (created by
+# Azure with the operator's key) in the docker group, password login off, and unattended security updates.
 package_update: true
 package_upgrade: true
 packages:
@@ -9,18 +9,9 @@ packages:
   - rsync
   - unattended-upgrades
 
-users:
-  - default
-  - name: fleet
-    groups: [docker]
-    shell: /bin/bash
-    sudo: "ALL=(ALL) NOPASSWD:ALL"
-    lock_passwd: true
-
 ssh_pwauth: false
 
 runcmd:
-  - cp /root/.ssh/authorized_keys /home/fleet/.ssh/authorized_keys || (mkdir -p /home/fleet/.ssh && cp /root/.ssh/authorized_keys /home/fleet/.ssh/)
-  - chown -R fleet:fleet /home/fleet/.ssh && chmod 700 /home/fleet/.ssh && chmod 600 /home/fleet/.ssh/authorized_keys
+  - usermod -aG docker fleet
   - systemctl enable --now docker
   - mkdir -p /opt/fleet-ingest && chown fleet:fleet /opt/fleet-ingest

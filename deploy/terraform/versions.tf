@@ -1,16 +1,18 @@
-# D8: one small Hetzner Cloud VM running the same Compose stack. Local state on purpose: one VM, one operator, and
-# nothing applied without an approved spend. `plan` is free; `apply` creates a billed server.
+# D8 (changed in S8-6): one small Azure VM running the same Compose stack, always on. Local state on purpose: one VM,
+# one operator. `plan` needs Azure credentials but changes nothing; `apply` creates billed resources and is run only
+# by the operator who holds the subscription, after the spend is approved.
 terraform {
   required_version = ">= 1.9.0"
 
   required_providers {
-    hcloud = {
-      source  = "hetznercloud/hcloud"
-      version = "1.69.0"
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "4.14.0"
     }
   }
 }
 
-provider "hcloud" {
-  token = var.hcloud_token
+provider "azurerm" {
+  features {}
+  subscription_id = var.subscription_id
 }

@@ -1,33 +1,32 @@
-variable "hcloud_token" {
-  description = "Hetzner Cloud API token (read and write) for the lab project. Pass it as TF_VAR_hcloud_token, never in a file."
+variable "subscription_id" {
+  description = "The Azure subscription to create the resources in. Pass it as TF_VAR_subscription_id (or ARM_SUBSCRIPTION_ID), never in a committed file."
   type        = string
   sensitive   = true
-
-  validation {
-    condition     = length(var.hcloud_token) == 64
-    error_message = "A Hetzner Cloud API token is 64 characters."
-  }
-}
-
-variable "server_type" {
-  description = "Server type. No default: the size and its monthly price are part of the D8 approval. The stack with 500 simulated gateways saturated 8 CPU / 4 GB (decisions.md S6-6); without fleet-sim, 4 vCPU / 8 GB is the floor to ask for."
-  type        = string
 }
 
 variable "location" {
-  description = "Hetzner location, e.g. fsn1, nbg1 or hel1."
+  description = "Azure region. The lab VM's region by default; prices were compared there (decisions.md S8-6)."
   type        = string
-  default     = "fsn1"
+  default     = "germanywestcentral"
 }
 
-variable "image" {
-  description = "OS image. Ubuntu 24.04 ships docker.io and docker-compose-v2 in its own archive, so cloud-init needs no third-party repository."
+variable "vm_size" {
+  description = "VM size. No default: the size and its monthly price are part of the spend approval (decisions.md S8-6 has the measured fit and the prices)."
   type        = string
-  default     = "ubuntu-24.04"
+}
+
+variable "dns_label" {
+  description = "The public IP's DNS label: the VM is <label>.<location>.cloudapp.azure.com, the one name Caddy gets a certificate for and gateways connect to."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,61}[a-z0-9]$", var.dns_label))
+    error_message = "A DNS label is 3-63 lowercase letters, digits and hyphens, starting with a letter."
+  }
 }
 
 variable "ssh_public_key" {
-  description = "The operator's SSH public key (the contents, not a path). The only way in."
+  description = "The operator's SSH public key (the contents, not a path). The only way in: password login is off."
   type        = string
 }
 
@@ -36,7 +35,13 @@ variable "admin_cidrs" {
   type        = list(string)
 
   validation {
-    condition     = length(var.admin_cidrs) > 0 && !contains(var.admin_cidrs, "0.0.0.0/0")
+    condition     = length(var.admin_cidrs) > 0 && !contains(var.admin_cidrs, "0.0.0.0/0") && !contains(var.admin_cidrs, "*")
     error_message = "List at least one admin range, and not 0.0.0.0/0: SSH is never open to the internet."
   }
+}
+
+variable "disk_size_gb" {
+  description = "OS disk size (Standard SSD). 32 GB is the smallest managed-disk tier; 30 days of readings for a few gateways is far below it."
+  type        = number
+  default     = 32
 }
