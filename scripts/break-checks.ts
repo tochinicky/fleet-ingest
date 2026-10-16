@@ -431,6 +431,15 @@ const BREAKS: Break[] = [
     project: "unit",
     test: "packages/broker-exporter/test/crl.test.ts",
   },
+  {
+    name: "smoke-identity-reused",
+    rule: "Each smoke run uses its own gateway identity, so an earlier revocation can't fail it (S8-8)",
+    injects: "every run reuses one smoke gateway, which fails for good once the revocation test revokes it",
+    file: "scripts/smokeIdentity.ts",
+    edits: [{ find: "  return `smoke-${now.toISOString()", replace: "  return \"smoke-gw-1\" || `smoke-${now.toISOString()" }],
+    project: "unit",
+    test: "scripts/smokeIdentity.test.ts",
+  },
 ];
 
 /** Applies one break, runs its test, restores the file, and reports whether the test caught it (i.e. failed). */

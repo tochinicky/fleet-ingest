@@ -6,14 +6,16 @@
  * 1. HTTPS with a publicly trusted certificate (Node's default trust store, no -k): `/health/ready` answers ready.
  * 2. The API refuses `/fleet` without the token and serves it with it.
  * 3. Grafana answers under /grafana/ and refuses its API without a login (no anonymous viewer in production).
- * 4. MQTT on 8883: a client without a certificate is refused; a gateway certificate from the lab CA connects (TLS
- *    server name `mosquitto`), and a reading it publishes is stored and served by the API within 30 s.
+ * 4. MQTT on 8883: a client without a certificate is refused; this run's own gateway certificate connects (TLS
+ *    server name `mosquitto`), and a reading it publishes is stored and served by the API within 30 s; and the most
+ *    recently revoked smoke certificate, if there is one, is refused as revoked.
  * 5. Nothing else is reachable: Postgres, Prometheus, Grafana's and the API's own ports are closed from outside.
  * 6. The CRL (this machine's copy, which deploy.sh and gateway-admin push) is valid for at least 7 more days (S8-7).
  *
- * The smoke gateway's certificate (`smoke-gw-1`) is issued on this machine if it's missing (scripts/pki.sh). It's an
- * ordinary gateway, enrolled by connecting; revoke it with `DEPLOY_HOST=fleet@<fqdn> node scripts/gateway-admin.ts
- * revoke smoke-gw-1` if it must not stay valid.
+ * Each run issues its own gateway, `smoke-<UTC timestamp>` (smokeIdentity.ts), on this machine (scripts/pki.sh), and
+ * registers it with dynsec when the admin certificate is here, so no run depends on an earlier one's certificate.
+ * Revoke it afterwards to test revocation on the VM: `DEPLOY_HOST=fleet@<fqdn> node scripts/gateway-admin.ts revoke
+ * <id>`; the next run then checks that it's refused.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -21,11 +23,12 @@ import { connect as tcpConnect } from "node:net";
 import { join } from "node:path";
 import { connectAsync } from "mqtt";
 import { crlTimes } from "../packages/broker-exporter/src/core/crl.ts";
-import { tryHandshake } from "./gatewayAdmin.ts";
+import { dynsecCommand, tryHandshake } from "./gatewayAdmin.ts";
+import { lastRevokedSmokeId, smokeGatewayId } from "./smokeIdentity.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const CERTS = join(ROOT, "deploy", "certs");
-const GATEWAY = "smoke-gw-1";
+const GATEWAY = smokeGatewayId(new Date());
 const host = process.env.PUBLIC_HOST ?? "";
 const token = process.env.API_TOKEN ?? "";
 const results: Array<{ check: string; pass: boolean; detail: string }> = [];
@@ -64,9 +67,18 @@ async function main(): Promise<void> {
   const anonymous = await connectAsync(endpoint.url, { protocolVersion: 5, reconnectPeriod: 0, connectTimeout: 5000, ca: readFileSync(endpoint.caFile), servername: "mosquitto", clientId: "smoke-anonymous" })
     .then(async (c) => { await c.endAsync(); return "connected"; }, (e: Error) => e.message);
   record("MQTT: a client without a certificate is refused", anonymous !== "connected", anonymous.slice(0, 120));
-  if (!existsSync(join(CERTS, `${GATEWAY}.crt`))) execFileSync(join(ROOT, "scripts", "pki.sh"), ["issue", CERTS, GATEWAY], { stdio: "ignore" });
+  const revokedEarlier = lastRevokedSmokeId(readFileSync(join(CERTS, "index.txt"), "utf8"));
+  if (revokedEarlier && existsSync(join(CERTS, `${revokedEarlier}.crt`))) {
+    const refused = await tryHandshake(endpoint, join(CERTS, `${revokedEarlier}.crt`), join(CERTS, `${revokedEarlier}.key`), `${revokedEarlier}-probe`);
+    record("MQTT: a revoked certificate is refused", refused === "revoked", `${revokedEarlier}: ${typeof refused === "string" ? refused : refused.refused.slice(0, 100)}`);
+  } else {
+    process.stdout.write("SKIP  MQTT: a revoked certificate is refused  (no revoked smoke certificate yet: revoke this run's to test it next time)\n");
+  }
+  execFileSync(join(ROOT, "scripts", "pki.sh"), ["issue", CERTS, GATEWAY], { stdio: "ignore" });
+  const admin = { certFile: join(ROOT, "deploy", "admin", "certs", "dynsec-admin.crt"), keyFile: join(ROOT, "deploy", "admin", "certs", "dynsec-admin.key") };
+  if (existsSync(admin.certFile)) await dynsecCommand(endpoint, admin, { command: "createClient", username: GATEWAY }, [/already exists/i]);
   const handshake = await tryHandshake(endpoint, join(CERTS, `${GATEWAY}.crt`), join(CERTS, `${GATEWAY}.key`), `${GATEWAY}-probe`);
-  record("MQTT: a gateway certificate from the lab CA connects", handshake === "connected", typeof handshake === "string" ? handshake : handshake.refused.slice(0, 120));
+  record(`MQTT: this run's gateway certificate (${GATEWAY}) connects`, handshake === "connected", typeof handshake === "string" ? handshake : handshake.refused.slice(0, 120));
   if (handshake === "connected") {
     const deviceId = `${GATEWAY}-bat-1`;
     const seq = Math.floor(Date.now() / 1000);
@@ -91,7 +103,7 @@ async function main(): Promise<void> {
   const daysLeft = nextUpdate ? (nextUpdate.getTime() - Date.now()) / 86_400_000 : 0;
   record("the CRL is valid for at least 7 more days (renew: gateway-admin.ts renew-crl)", daysLeft >= 7, `nextUpdate ${nextUpdate?.toISOString() ?? "none"}, ${daysLeft.toFixed(1)} days left`);
   const failed = results.filter((r) => !r.pass).length;
-  process.stdout.write(`smoke: ${failed ? `FAIL (${failed} of ${results.length})` : "PASS"}\n`);
+  process.stdout.write(`smoke: ${failed ? `FAIL (${failed} of ${results.length})` : "PASS"}; this run's gateway: ${GATEWAY}\n`);
   process.exit(failed ? 1 : 0);
 }
 

@@ -120,7 +120,7 @@ From the operator's machine, at the repo root, with the repo's Node (24; the scr
 nvm use && corepack pnpm install
 PUBLIC_HOST=<fqdn> API_TOKEN=<the deployed token> node scripts/smoke.ts
 ```
-It checks, from outside: trusted HTTPS and readiness, the API token, Grafana behind a login, MQTT refusing a client without a certificate and accepting a gateway's, a reading stored end to end, every internal port closed, and at least 7 days left on the CRL. `smoke: PASS` and exit 0, or the failing checks.
+It checks, from outside: trusted HTTPS and readiness, the API token, Grafana behind a login, MQTT refusing a client without a certificate, refusing the last revoked smoke certificate, and accepting this run's own new one (`smoke-<UTC time>`), a reading stored end to end, every internal port closed, and at least 7 days left on the CRL. `smoke: PASS` and exit 0, or the failing checks. To test revocation on the VM, revoke the run's gateway afterwards (`DEPLOY_HOST=fleet@<fqdn> node scripts/gateway-admin.ts revoke <id>`, the ID it printed); the next run checks it's refused.
 
 ---
 
